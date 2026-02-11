@@ -235,22 +235,39 @@ pub fn cbet_recommendation(
     spr_value: f64,
     multiway: bool,
 ) -> CBetRecommendation {
-    let _ = spr_value; // matching Python signature
+    // SPR adjustment: low SPR → commit more often, high SPR → be more selective
+    let spr_adj: f64 = if spr_value <= 4.0 {
+        0.12
+    } else if spr_value > 10.0 {
+        -0.10
+    } else {
+        0.0
+    };
+
+    let spr_note = if spr_value <= 4.0 {
+        " (SPR ≤4: increased frequency)"
+    } else if spr_value > 10.0 {
+        " (SPR >10: reduced frequency)"
+    } else {
+        ""
+    };
 
     if multiway {
         if board_texture.wetness == Wetness::Dry {
+            let freq = (0.4 + spr_adj).clamp(0.0, 1.0);
             return CBetRecommendation {
                 should_cbet: true,
-                frequency: 0.4,
+                frequency: freq,
                 sizing: "33% pot".to_string(),
-                reasoning: "Dry board multiway \u{2014} small sizing, lower frequency".to_string(),
+                reasoning: format!("Dry board multiway \u{2014} small sizing, lower frequency{}", spr_note),
             };
         }
+        let freq = (0.2 + spr_adj).clamp(0.0, 1.0);
         return CBetRecommendation {
-            should_cbet: false,
-            frequency: 0.2,
+            should_cbet: freq > 0.15,
+            frequency: freq,
             sizing: "50% pot".to_string(),
-            reasoning: "Wet board multiway \u{2014} check most hands, bet selectively".to_string(),
+            reasoning: format!("Wet board multiway \u{2014} check most hands, bet selectively{}", spr_note),
         };
     }
 
@@ -258,52 +275,58 @@ pub fn cbet_recommendation(
 
     if board_texture.wetness == Wetness::Dry {
         if ip {
+            let freq = (0.7 + spr_adj).clamp(0.0, 1.0);
             return CBetRecommendation {
                 should_cbet: true,
-                frequency: 0.7,
+                frequency: freq,
                 sizing: "33% pot".to_string(),
-                reasoning: "Dry board IP \u{2014} high frequency small c-bet".to_string(),
+                reasoning: format!("Dry board IP \u{2014} high frequency small c-bet{}", spr_note),
             };
         }
+        let freq = (0.5 + spr_adj).clamp(0.0, 1.0);
         return CBetRecommendation {
             should_cbet: true,
-            frequency: 0.5,
+            frequency: freq,
             sizing: "33% pot".to_string(),
-            reasoning: "Dry board OOP \u{2014} moderate frequency small c-bet".to_string(),
+            reasoning: format!("Dry board OOP \u{2014} moderate frequency small c-bet{}", spr_note),
         };
     }
 
     if board_texture.wetness == Wetness::Wet {
         if ip {
+            let freq = (0.5 + spr_adj).clamp(0.0, 1.0);
             return CBetRecommendation {
                 should_cbet: true,
-                frequency: 0.5,
+                frequency: freq,
                 sizing: "66-75% pot".to_string(),
-                reasoning: "Wet board IP \u{2014} polarized sizing, moderate frequency".to_string(),
+                reasoning: format!("Wet board IP \u{2014} polarized sizing, moderate frequency{}", spr_note),
             };
         }
+        let freq = (0.35 + spr_adj).clamp(0.0, 1.0);
         return CBetRecommendation {
             should_cbet: true,
-            frequency: 0.35,
+            frequency: freq,
             sizing: "66-75% pot".to_string(),
-            reasoning: "Wet board OOP \u{2014} selective, larger sizing".to_string(),
+            reasoning: format!("Wet board OOP \u{2014} selective, larger sizing{}", spr_note),
         };
     }
 
     // Medium
     if ip {
+        let freq = (0.6 + spr_adj).clamp(0.0, 1.0);
         CBetRecommendation {
             should_cbet: true,
-            frequency: 0.6,
+            frequency: freq,
             sizing: "50% pot".to_string(),
-            reasoning: "Medium texture IP \u{2014} balanced frequency and sizing".to_string(),
+            reasoning: format!("Medium texture IP \u{2014} balanced frequency and sizing{}", spr_note),
         }
     } else {
+        let freq = (0.45 + spr_adj).clamp(0.0, 1.0);
         CBetRecommendation {
             should_cbet: true,
-            frequency: 0.45,
+            frequency: freq,
             sizing: "50% pot".to_string(),
-            reasoning: "Medium texture OOP \u{2014} moderate sizing".to_string(),
+            reasoning: format!("Medium texture OOP \u{2014} moderate sizing{}", spr_note),
         }
     }
 }

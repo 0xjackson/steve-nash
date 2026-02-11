@@ -186,7 +186,12 @@ fn has_straight_draw_hero(hole_cards: &[Card], board: &[Card]) -> bool {
         let mut low_vals: Vec<u8> = all_values.iter().filter(|&&v| v <= 5).copied().collect();
         low_vals.push(1); // ace as 1
         if low_vals.len() >= 4 {
-            return true;
+            // Check that hero contributes at least one card to this draw
+            let hero_contributes = hero_values.contains(&14)
+                || hero_values.iter().any(|v| *v <= 5);
+            if hero_contributes {
+                return true;
+            }
         }
     }
     false

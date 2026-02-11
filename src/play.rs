@@ -335,15 +335,12 @@ fn prompt_menu(
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
 ) -> String {
-    writeln!(writer, "\n  {}:", title.bold()).ok();
+    writeln!(writer, "\n  {}", title.bold()).ok();
     for (i, opt) in options.iter().enumerate() {
-        if i == default_idx {
-            writeln!(writer, "    {}  {} {}", format!("{})", i + 1).bold(), opt, "(default)".dimmed()).ok();
-        } else {
-            writeln!(writer, "    {}  {}", format!("{})", i + 1).bold(), opt).ok();
-        }
+        let marker = if i == default_idx { " <" } else { "" };
+        writeln!(writer, "    {}  {}{}", format!("{}.", i + 1).bold(), opt, marker.dimmed()).ok();
     }
-    let answer = prompt("  Enter", Some(&format!("{}", default_idx + 1)), reader, writer);
+    let answer = prompt("  Enter a number", Some(&format!("{}", default_idx + 1)), reader, writer);
     if answer.to_lowercase() == "q" {
         return "q".to_string();
     }

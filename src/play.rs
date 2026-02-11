@@ -762,6 +762,23 @@ fn show_street_analysis(
     writeln!(writer, "\n{}", format!("--- {} ---", capitalize(street)).cyan().bold()).ok();
     writeln!(writer, "  Board: {}", board_display(board)).ok();
 
+    // Pot / Stack / SPR status line
+    let spr_result = if pot > 0.0 { calc_spr(stack, pot).ok() } else { None };
+    writeln!(
+        writer,
+        "  Pot: {}  |  Stack: {}  |  SPR: {}",
+        format!("${:.0}", pot).bold(),
+        format!("${:.0}", stack).bold(),
+        if let Some(ref spr_r) = spr_result {
+            format!("{:.1} ({})", spr_r.ratio, spr_r.zone).bold().to_string()
+        } else {
+            "-".to_string()
+        }
+    ).ok();
+    if let Some(ref spr_r) = spr_result {
+        writeln!(writer, "  {}", explain_spr(spr_r.zone).dimmed()).ok();
+    }
+
     // Board texture
     let texture = match analyze_board(board) {
         Ok(t) => t,
@@ -800,14 +817,6 @@ fn show_street_analysis(
         }
     };
 
-    // SPR
-    if pot > 0.0 {
-        if let Ok(spr_result) = calc_spr(stack, pot) {
-            writeln!(writer, "\n  SPR: {}", spr_result).ok();
-            writeln!(writer, "  {}", explain_spr(spr_result.zone).dimmed()).ok();
-        }
-    }
-
     // Hand strength classification
     let strength = classify_hand_strength(&hand_result, hole_cards, board, equity);
     writeln!(writer, "\n  Strength: {}", strength.bold()).ok();
@@ -816,18 +825,44 @@ fn show_street_analysis(
     // Strategy recommendation
     let strat = street_strategy(strength, &texture, pot, stack, ip_label, street);
 
-    writeln!(writer, "\n  \u{2192} {} {}", styled_action(&strat.action), strat.sizing).ok();
+    // Build action line with dollar amounts
+    let action_detail = if strat.action.starts_with("BET") && pot > 0.0 {
+        if let Some(sizing_pct) = parse_sizing_pct(&strat.sizing) {
+            let bet_amount = pot * sizing_pct;
+            format!(
+                "\n  \u{2192} {}  ${:.0} ({} into ${:.0} pot)",
+                styled_action(&strat.action),
+                bet_amount,
+                strat.sizing,
+                pot
+            )
+        } else {
+            format!("\n  \u{2192} {} {}", styled_action(&strat.action), strat.sizing)
+        }
+    } else if strat.action.contains("CHECK/CALL") && pot > 0.0 {
+        format!(
+            "\n  \u{2192} {}  (pot is ${:.0}, stack ${:.0})",
+            styled_action(&strat.action),
+            pot,
+            stack
+        )
+    } else {
+        format!("\n  \u{2192} {} {}", styled_action(&strat.action), strat.sizing)
+    };
+    writeln!(writer, "{}", action_detail).ok();
     writeln!(writer, "  {}", format!("Why: {}", strat.reasoning).dimmed()).ok();
 
+    // EV estimate when we have equity and a bet sizing
     if strat.action.starts_with("BET") && pot > 0.0 {
         if let Some(sizing_pct) = parse_sizing_pct(&strat.sizing) {
             let bet_amount = pot * sizing_pct;
-            writeln!(
-                writer,
-                "  {}",
-                format!("Bet amount: ~${:.0} into ${:.0} pot", bet_amount, pot).dimmed()
-            )
-            .ok();
+            let ev_val = crate::math_engine::ev(equity, pot, bet_amount);
+            let ev_str = if ev_val >= 0.0 {
+                format!("+${:.0}", ev_val).green().to_string()
+            } else {
+                format!("-${:.0}", ev_val.abs()).red().to_string()
+            };
+            writeln!(writer, "  EV of bet: {}", ev_str).ok();
         }
     }
 
@@ -851,7 +886,8 @@ fn show_street_analysis(
                     writer,
                     "\n  {}",
                     format!(
-                        "Bluff math: a 66% pot bet needs villain to fold {:.0}% to break even",
+                        "Bluff math: ${:.0} bet (66% pot) needs villain to fold {:.0}% to break even",
+                        bluff_bet,
                         be * 100.0
                     )
                     .dimmed()

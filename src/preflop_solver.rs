@@ -62,20 +62,21 @@ impl Position {
         }
     }
 
-    /// Whether this position is in-position relative to the other.
-    /// Later positions act later postflop (more IP).
+    /// Whether this position is in-position relative to the other postflop.
+    /// Postflop action order: SB, BB, UTG, HJ, CO, BTN (BTN acts last = most IP).
     pub fn is_ip_vs(&self, other: &Position) -> bool {
-        self.seat_index() > other.seat_index()
+        self.postflop_order() > other.postflop_order()
     }
 
-    fn seat_index(&self) -> usize {
+    /// Postflop acting order (higher = acts later = more IP).
+    fn postflop_order(&self) -> usize {
         match self {
-            Position::UTG => 0,
-            Position::HJ => 1,
-            Position::CO => 2,
-            Position::BTN => 3,
-            Position::SB => 4,
-            Position::BB => 5,
+            Position::SB => 0,
+            Position::BB => 1,
+            Position::UTG => 2,
+            Position::HJ => 3,
+            Position::CO => 4,
+            Position::BTN => 5,
         }
     }
 
@@ -1027,8 +1028,12 @@ mod tests {
 
     #[test]
     fn position_ip() {
+        // Postflop order: SB(0), BB(1), UTG(2), HJ(3), CO(4), BTN(5)
         assert!(Position::BTN.is_ip_vs(&Position::CO));
+        assert!(Position::BTN.is_ip_vs(&Position::BB));
         assert!(Position::BB.is_ip_vs(&Position::SB));
+        assert!(Position::UTG.is_ip_vs(&Position::BB));
+        assert!(!Position::SB.is_ip_vs(&Position::BB));
         assert!(!Position::UTG.is_ip_vs(&Position::BTN));
     }
 

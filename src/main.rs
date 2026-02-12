@@ -13,6 +13,7 @@ mod multiway;
 mod play;
 mod postflop;
 mod preflop;
+mod preflop_solver;
 mod ranges;
 
 fn main() {

@@ -179,26 +179,25 @@ enum Commands {
     },
     /// Full decision advisor — preflop and postflop
     Action {
-        /// Your hand (e.g., AKs)
+        /// Your hand (e.g., AKs, QQ, T9o)
         hand: String,
-        /// Your position
-        #[arg(short, long)]
+        /// Your position (UTG, HJ, CO, BTN, SB, BB)
         position: String,
-        /// Board cards
+        /// Villain position (auto-detects RFI vs 3-bet)
+        #[arg(long)]
+        vs: Option<String>,
+        /// Board cards (e.g., AsKd7c)
         #[arg(short, long)]
         board: Option<String>,
         /// Current pot size
         #[arg(long)]
         pot: Option<f64>,
-        /// Effective stack size
-        #[arg(long)]
-        stack: Option<f64>,
-        /// Villain position
-        #[arg(long)]
-        vs: Option<String>,
-        /// Preflop situation
-        #[arg(short, long, default_value = "RFI")]
-        situation: ActionSituation,
+        /// Effective stack size in bb
+        #[arg(long, default_value = "60")]
+        stack: f64,
+        /// Rake percentage
+        #[arg(long, default_value = "0")]
+        rake: f64,
         /// Table format
         #[arg(short = 't', long = "table", default_value = "6max")]
         table_size: TableSize,
@@ -339,24 +338,36 @@ pub fn run() {
             pot,
             stack,
             vs,
-            situation,
             table_size,
             players,
             street,
             strength,
-        } => cmd_action(
-            hand,
-            position,
-            board,
-            pot,
-            stack,
-            vs,
-            situation,
-            table_size.as_str(),
-            players,
-            street,
-            strength,
-        ),
+            rake,
+        } => {
+            if board.is_none() {
+                cmd_action_preflop(hand, position, vs, table_size.as_str(), stack, rake);
+            } else {
+                // Infer situation for postflop static advisor
+                let situation = if vs.is_some() {
+                    ActionSituation::VsRFI
+                } else {
+                    ActionSituation::RFI
+                };
+                cmd_action(
+                    hand,
+                    position,
+                    board,
+                    pot,
+                    Some(stack),
+                    vs,
+                    situation,
+                    table_size.as_str(),
+                    players,
+                    street,
+                    strength,
+                );
+            }
+        }
         Commands::Mdf { pot, bet, players } => cmd_mdf(pot, bet, players),
         Commands::Spr {
             stack_size,
@@ -1066,6 +1077,209 @@ fn cmd_board(cards: String) {
         cbet_oop.reasoning
     );
     println!();
+}
+
+fn cmd_action_preflop(
+    hand: String,
+    position: String,
+    vs: Option<String>,
+    table_size: &str,
+    stack_bb: f64,
+    rake: f64,
+) {
+    use crate::game_tree::hand_to_bucket;
+    use crate::preflop_solver::{Position, PreflopSolution};
+
+    let position = match validate_position(&position, table_size) {
+        Ok(p) => p,
+        Err(e) => {
+            print_error(&e);
+            return;
+        }
+    };
+
+    let bucket = match hand_to_bucket(&hand) {
+        Some(b) => b,
+        None => {
+            print_error(&format!("Invalid hand: '{}'. Use format like AKs, QQ, T9o", hand));
+            return;
+        }
+    };
+
+    let solution = match PreflopSolution::load(table_size, stack_bb, rake) {
+        Ok(s) => s,
+        Err(_) => {
+            print_error(&format!(
+                "No cached solution for {}bb. Run 'gto solve preflop --stack {}' first.",
+                stack_bb, stack_bb,
+            ));
+            return;
+        }
+    };
+
+    let pos = match Position::from_str(&position) {
+        Some(p) => p,
+        None => {
+            print_error(&format!("Invalid position: {}", position));
+            return;
+        }
+    };
+
+    println!();
+    println!(
+        "  {} {} in {} | {}bb",
+        "GTO".bold(),
+        hand.bold(),
+        position.bold(),
+        stack_bb,
+    );
+
+    match vs {
+        None => {
+            // RFI — should I open?
+            let spot = solution.spots.iter().find(|s| s.opener == pos);
+            match spot {
+                Some(spot) => {
+                    let open_freq = spot.open_strategy[bucket];
+                    let fold_freq = 1.0 - open_freq;
+
+                    println!();
+                    print_action_freqs(&[("RAISE 2.5bb", open_freq), ("FOLD", fold_freq)]);
+
+                    // Show vs each responder if we're opening
+                    if open_freq > 0.1 {
+                        println!();
+                        println!("  {}", "If facing 3-bet:".bold());
+                        for resp_spot in solution.spots.iter().filter(|s| s.opener == pos) {
+                            let fourbet = resp_spot.vs_3bet_4bet[bucket];
+                            let call3 = resp_spot.vs_3bet_call[bucket];
+                            let fold3 = 1.0 - fourbet - call3;
+                            if fourbet > 0.01 || call3 > 0.01 {
+                                println!(
+                                    "    vs {}: 4-Bet {:.0}% | Call {:.0}% | Fold {:.0}%",
+                                    resp_spot.responder.as_str().bold(),
+                                    fourbet * 100.0,
+                                    call3 * 100.0,
+                                    fold3 * 100.0,
+                                );
+                            }
+                        }
+                    }
+                    println!();
+                }
+                None => {
+                    print_error(&format!("No opening spot found for {}", position));
+                }
+            }
+        }
+        Some(vs_str) => {
+            let vs_str = match validate_position(&vs_str, table_size) {
+                Ok(p) => p,
+                Err(e) => { print_error(&e); return; }
+            };
+            let vs_pos = match Position::from_str(&vs_str) {
+                Some(p) => p,
+                None => { print_error(&format!("Invalid position: {}", vs_str)); return; }
+            };
+
+            // Auto-detect: who opened first?
+            // Preflop open order: UTG(0) → HJ(1) → CO(2) → BTN(3) → SB(4) → BB(5)
+            let hero_order = preflop_open_order(pos);
+            let villain_order = preflop_open_order(vs_pos);
+
+            if hero_order > villain_order {
+                // Villain opened first, hero responds → vs open
+                let spot = solution.find_spot(vs_pos, pos);
+                match spot {
+                    Some(spot) => {
+                        let threebet = spot.vs_open_3bet[bucket];
+                        let call = spot.vs_open_call[bucket];
+                        let fold = 1.0 - threebet - call;
+
+                        println!("  vs {} open", vs_str.bold());
+                        println!();
+                        print_action_freqs(&[("3-BET", threebet), ("CALL", call), ("FOLD", fold)]);
+
+                        if threebet > 0.1 {
+                            let allin = spot.vs_4bet_allin[bucket];
+                            let call4 = spot.vs_4bet_call[bucket];
+                            let fold4 = 1.0 - allin - call4;
+                            println!();
+                            println!("  {}", "If facing 4-bet:".bold());
+                            println!(
+                                "    5-Bet All-In {:.0}% | Call {:.0}% | Fold {:.0}%",
+                                allin * 100.0, call4 * 100.0, fold4 * 100.0,
+                            );
+                        }
+                        println!();
+                    }
+                    None => {
+                        print_error(&format!("No spot for {} vs {} open", position, vs_str));
+                    }
+                }
+            } else {
+                // Hero opened first, villain 3-bet → vs 3-bet
+                let spot = solution.find_spot(pos, vs_pos);
+                match spot {
+                    Some(spot) => {
+                        let fourbet = spot.vs_3bet_4bet[bucket];
+                        let call3 = spot.vs_3bet_call[bucket];
+                        let fold3 = 1.0 - fourbet - call3;
+
+                        println!("  vs {} 3-bet", vs_str.bold());
+                        println!();
+                        print_action_freqs(&[("4-BET", fourbet), ("CALL", call3), ("FOLD", fold3)]);
+
+                        if fourbet > 0.1 {
+                            let call5 = spot.vs_5bet_call[bucket];
+                            let fold5 = 1.0 - call5;
+                            println!();
+                            println!("  {}", "If facing 5-bet all-in:".bold());
+                            println!(
+                                "    Call {:.0}% | Fold {:.0}%",
+                                call5 * 100.0, fold5 * 100.0,
+                            );
+                        }
+                        println!();
+                    }
+                    None => {
+                        print_error(&format!("No spot for {} vs {} 3-bet", position, vs_str));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Preflop open order (who RFIs first). Lower = opens first.
+fn preflop_open_order(pos: crate::preflop_solver::Position) -> usize {
+    use crate::preflop_solver::Position;
+    match pos {
+        Position::UTG => 0,
+        Position::HJ => 1,
+        Position::CO => 2,
+        Position::BTN => 3,
+        Position::SB => 4,
+        Position::BB => 5,
+    }
+}
+
+/// Print action frequencies, sorted by frequency, filtering out <1%.
+fn print_action_freqs(actions: &[(&str, f64)]) {
+    let mut sorted: Vec<(&str, f64)> = actions.to_vec();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let primary = sorted[0];
+    if primary.1 > 0.9 {
+        println!("  Action: {}  ({:.0}%)", styled_action(primary.0), primary.1 * 100.0);
+    } else {
+        let parts: Vec<String> = sorted
+            .iter()
+            .filter(|(_, f)| *f > 0.01)
+            .map(|(name, freq)| format!("{} {:.0}%", styled_action(name), freq * 100.0))
+            .collect();
+        println!("  Action: {}", parts.join(" | "));
+    }
 }
 
 fn cmd_action(

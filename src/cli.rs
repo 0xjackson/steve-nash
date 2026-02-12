@@ -255,6 +255,21 @@ enum SolverCommands {
         #[arg(short, long, default_value = "10000")]
         iterations: usize,
     },
+    /// Solve full preflop decision tree (open/3-bet/4-bet)
+    Preflop {
+        /// Table format
+        #[arg(short = 't', long = "table", default_value = "6max")]
+        table_size: TableSize,
+        /// Stack depth in big blinds
+        #[arg(short, long, default_value = "100")]
+        stack: f64,
+        /// Rake percentage (0-100)
+        #[arg(short, long, default_value = "0")]
+        rake: f64,
+        /// Number of CFR+ iterations (more = more accurate)
+        #[arg(short, long, default_value = "50000")]
+        iterations: usize,
+    },
 }
 
 fn validate_position(pos: &str, table_size: &str) -> Result<String, String> {
@@ -338,6 +353,12 @@ pub fn run() {
                 rake,
                 iterations,
             } => cmd_solve_pushfold(stack, rake, iterations),
+            SolverCommands::Preflop {
+                table_size,
+                stack,
+                rake,
+                iterations,
+            } => cmd_solve_preflop(table_size, stack, rake, iterations),
         },
     }
 }
@@ -1150,4 +1171,84 @@ fn cmd_solve_pushfold(stack: f64, rake: f64, iterations: usize) {
 
     let result = solve_push_fold(stack, iterations, rake);
     result.display();
+}
+
+fn cmd_solve_preflop(table_size: TableSize, stack: f64, rake: f64, iterations: usize) {
+    use crate::preflop_solver::solve_preflop_6max;
+
+    if stack <= 0.0 {
+        print_error("Stack must be positive");
+        return;
+    }
+    if rake < 0.0 || rake > 100.0 {
+        print_error("Rake must be between 0 and 100");
+        return;
+    }
+
+    match table_size {
+        TableSize::NineMax => {
+            print_error("Preflop solver currently only supports 6max");
+            return;
+        }
+        _ => {}
+    }
+
+    println!();
+    println!(
+        "  {} Solving preflop for {} | {}bb stack | {}% rake | {} iterations",
+        "GTO".bold(),
+        table_size.as_str(),
+        stack,
+        rake,
+        iterations,
+    );
+    println!();
+
+    let solution = solve_preflop_6max(stack, iterations, rake);
+
+    // Display summary table
+    println!();
+    println!("  {}", "Solution Summary".bold());
+    println!();
+
+    let mut table = Table::new();
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(vec![
+        Cell::new("Spot".bold().to_string()),
+        Cell::new("Open %").set_alignment(CellAlignment::Right),
+        Cell::new("3-Bet %").set_alignment(CellAlignment::Right),
+        Cell::new("Flat %").set_alignment(CellAlignment::Right),
+        Cell::new("Exploit").set_alignment(CellAlignment::Right),
+    ]);
+
+    for spot in &solution.spots {
+        table.add_row(vec![
+            Cell::new(format!("{} vs {}", spot.opener, spot.responder)),
+            Cell::new(format!("{:.1}", spot.open_pct())),
+            Cell::new(format!("{:.1}", spot.three_bet_pct())),
+            Cell::new(format!("{:.1}", spot.flat_call_pct())),
+            Cell::new(format!("{:.4}", spot.exploitability)),
+        ]);
+    }
+
+    println!("{}", table);
+
+    // Save to disk
+    match solution.save() {
+        Ok(()) => {
+            println!();
+            println!(
+                "  Solution saved to {}",
+                solution.cache_path().display().to_string().dimmed()
+            );
+            println!(
+                "  Use {} to view solved ranges.",
+                "gto range <POS> --solved --stack <BB>".bold()
+            );
+        }
+        Err(e) => {
+            print_error(&format!("Failed to save solution: {}", e));
+        }
+    }
+    println!();
 }

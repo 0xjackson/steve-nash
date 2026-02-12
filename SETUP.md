@@ -60,7 +60,7 @@ gto action AhQd --position BTN --board Ks9d4c7hQc --pot 10 --stack 95.5
 |---|---|---|---|---|
 | 1 | Push/fold solver | DONE | 3-5 sec | Instant |
 | 2 | Full preflop (open/3bet/4bet/5bet) | DONE | 3 min | Instant |
-| 3 | River solver | TODO | 1-5 sec/spot | Instant |
+| 3 | River solver | DONE | 1-5 sec/spot | Instant |
 | 4 | Turn solver (includes river) | TODO | 15-45 sec/spot | Instant |
 | 5 | Flop solver (includes turn+river) | TODO | 1-4 min/spot | Instant |
 | 6 | Infrastructure: CFR engine optimization | TODO | N/A | N/A |
@@ -135,98 +135,38 @@ SB shoves or folds, BB calls or folds. Nash equilibrium for any stack depth.
 
 ---
 
-## Phase 3: River Solver
+## Phase 3: River Solver — DONE
 
-### Context
+Heads-up river CFR+ solver with exact showdown evaluation at the combo level.
 
-Simplest postflop street — no more cards to come, hand strengths are final. Foundation for turn and flop solvers.
+**Files**: `src/river_solver.rs`, `src/postflop_tree.rs`, CLI in `src/cli.rs`
+**Tests**: 17 tests in `tests/test_river_solver.rs` + 5 unit tests in `src/postflop_tree.rs`
+**Commands**: `gto solve river --board --oop --ip --pot --stack --iterations`
 
-### Input/Output
-
-**Input**: 5-card board, IP range, OOP range, pot (bb), effective stack (bb), bet sizes
-**Output**: Strategy for every hand at every decision point (check/bet/raise/call/fold with frequencies)
-
-### Game Tree
-
-```
-OOP Decision: Check / Bet 33% / Bet 66% / Bet 100%
-├─ Check → IP Decision: Check / Bet 33% / Bet 66% / Bet 100%
-│    ├─ Check → Showdown
-│    └─ Bet X → OOP Decision: Call / Raise / Fold
-│         ├─ Call → Showdown
-│         ├─ Raise → IP Decision: Call / Fold
-│         └─ Fold → IP wins
-├─ Bet X → IP Decision: Call / Raise / Fold
-│    ├─ Call → Showdown
-│    ├─ Raise → OOP Decision: Call / Fold
-│    └─ Fold → OOP wins
-```
-
-Max depth: ~6 actions (bet → raise → reraise → call). Cap raises at 3 per street.
-
-### Scale
-
-- ~1,000 relevant hand combos per player (1,326 minus board/range blockers)
-- ~5 actions per node, ~20-40 game tree nodes
-- **Info sets: ~10,000-50,000**
-- **Memory: <10 MB**
-
-### Decisions
-
-- **Bet sizes**: 33%, 66%, 100% pot (3 sizes). Configurable via CLI.
-- **Raise sizes**: Min-raise + pot (2 sizes)
-- **Max raises**: 3 per street (bet → raise → reraise → cap)
-- **Hand representation**: Actual combos (not bucketed) — river is small enough for exact computation
-- **Showdown evaluation**: Use `evaluate_fast()` — 10-50M evals/sec, no Monte Carlo needed on river
-
-### Performance
-
-- **Solve time**: 1-5 seconds per spot at 10K iterations
-- **Accuracy**: Exploitability < 0.1% pot
-- **Memory**: <10 MB per solve
-- **Query**: Instant from cache
-
-### Files
-
-| File | Action |
-|---|---|
-| `src/postflop_solver.rs` | NEW — game tree builder, river CFR+, showdown evaluation |
-| `src/postflop_tree.rs` | NEW — generic postflop game tree structure (reused by turn/flop) |
-| `src/lib.rs` | MODIFY — add modules |
-| `src/main.rs` | MODIFY — add modules |
-| `src/cli.rs` | MODIFY — add `gto solve postflop` command |
-| `tests/test_river_solver.rs` | NEW |
-
-### Steps
-
-**3.1**: Postflop game tree builder (`src/postflop_tree.rs`)
-- `PostflopNode` enum: Decision / Chance / Terminal
-- `PostflopTree` struct: builds tree from bet size config
-- Tree nodes store: player to act, pot, stacks, allowed actions
-- Configurable bet sizes, raise sizes, raise cap
-
-**3.2**: River solver core (`src/postflop_solver.rs`)
-- `RiverSolver` struct: takes board, ranges, tree config
-- Filter hand combos by board blockers (remove hands that conflict with board cards)
-- Compute showdown values for all hand vs hand matchups using `evaluate_fast()`
-- CFR+ iteration over the river game tree
-- Extract average strategies per hand per node
-
-**3.3**: River solve caching
-- `RiverSolution` struct with serde
+**Key decisions made**:
+- Exact combo-level computation (not bucketed) — river is small enough
+- Blocker-aware showdown precomputation: evaluate each combo once via `evaluate_fast()`, build validity tables
+- Alternating-traverser CFR+ with per-hand sequential tree traversal and `opp_reach` vector propagation
+- Reuses existing `CfrTrainer`/`InfoSetKey`/`InfoSetData` from `src/cfr.rs`
+- `postflop_tree.rs` is generic — reusable for turn/flop solvers
+- Exploitability via best-response traversal
 - Cache to `~/.gto-cli/solver/river_{board}_{pot}_{stack}.json`
-- Load for instant queries
 
-**3.4**: CLI integration
-- Add `Postflop` variant to `SolverCommands`: `gto solve postflop --board Xs... --pot P --stack S --bet-sizes "33,66,100"`
-- Add `gto strategy` command: look up cached strategy for a specific hand on a board
+**Architecture**:
+- `src/postflop_tree.rs`: `TreeNode` enum (Action/Terminal), `TreeConfig`, `build_tree()` with configurable bet/raise sizes, max raises, all-in clamping
+- `src/river_solver.rs`: `ShowdownTable` (precomputed scores + blocker tables), `solve_river()`, `compute_exploitability()`, strategy extraction, caching, display
 
-**3.5**: Tests
-- Convergence: exploitability < 0.1% pot
-- Nuts always bets (e.g., if you have the nut flush on river, always bet)
-- Air always checks or folds
-- Bluff frequency matches bet sizing math (e.g., pot-size bet → 33% bluffs)
-- Value bets increase with hand strength
+### Known Performance Issues (to address before Phase 4)
+
+These are functional but suboptimal. Phase 4 (turn solver) will need these fixed to scale:
+
+1. **Single-threaded CFR iteration**: Each combo's tree traversal is independent but all mutate the shared `CfrTrainer`. Fix: collect regret updates per-combo into thread-local buffers, batch-apply after all combos. Enables rayon parallelization.
+
+2. **opp_reach vector allocation**: A new `Vec<f64>` is heap-allocated at every opponent action node × every action × every iteration. For 1000 combos × 30 nodes × 5 actions × 10K iterations = ~1.5 billion allocations. Fix: pre-allocate a stack of reusable buffers sized to max(num_oop, num_ip), pass by mutable reference through recursion.
+
+3. **Strategy snapshot per iteration**: A fresh `HashMap<u16, Vec<Vec<f64>>>` is built every iteration to snapshot opponent strategies (avoids borrow conflict with trainer). Fix: allocate the snapshot structure once before the iteration loop, overwrite values in-place each iteration instead of rebuilding.
+
+4. **HashMap-based CfrTrainer**: The `HashMap<InfoSetKey, InfoSetData>` with `Vec<f64>` per info set is ~120 bytes per entry + hash overhead. Phase 4 introduces `FlatCfr` with contiguous f32 arrays (~24 bytes per info set, zero overhead). This is the biggest win for turn/flop scale.
 
 ---
 

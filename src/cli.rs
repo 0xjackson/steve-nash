@@ -134,6 +134,15 @@ enum Commands {
         /// Preflop situation
         #[arg(short, long, default_value = "RFI")]
         situation: Situation,
+        /// Use solved ranges instead of static charts
+        #[arg(long)]
+        solved: bool,
+        /// Stack depth for solved ranges (in bb)
+        #[arg(long, default_value = "100")]
+        stack: f64,
+        /// Rake percentage for solved ranges
+        #[arg(long, default_value = "0")]
+        rake: f64,
     },
     /// Calculate equity between two hands or hand vs range
     Equity {
@@ -299,7 +308,16 @@ pub fn run() {
             table_size,
             vs,
             situation,
-        } => cmd_range(position, table_size.as_str(), vs, situation),
+            solved,
+            stack,
+            rake,
+        } => {
+            if solved {
+                cmd_range_solved(position, table_size.as_str(), vs, situation, stack, rake);
+            } else {
+                cmd_range(position, table_size.as_str(), vs, situation);
+            }
+        }
         Commands::Equity {
             hand1,
             versus,
@@ -534,6 +552,167 @@ fn cmd_range(position: String, table_size: &str, vs: Option<String>, situation: 
                 range_grid(&all_hands, &format!("BB vs {}", vs))
             );
             println!();
+        }
+    }
+}
+
+fn cmd_range_solved(
+    position: String,
+    table_size: &str,
+    vs: Option<String>,
+    situation: Situation,
+    stack_bb: f64,
+    rake_pct: f64,
+) {
+    use crate::display::strategy_grid;
+    use crate::preflop_solver::{Position, PreflopSolution};
+
+    let position = match validate_position(&position, table_size) {
+        Ok(p) => p,
+        Err(e) => {
+            print_error(&e);
+            return;
+        }
+    };
+
+    let solution = match PreflopSolution::load(table_size, stack_bb, rake_pct) {
+        Ok(s) => s,
+        Err(_) => {
+            print_error(&format!(
+                "No cached solution found for {} {}bb {}% rake. Run 'gto solve preflop --stack {} --rake {}' first.",
+                table_size, stack_bb, rake_pct, stack_bb, rake_pct,
+            ));
+            return;
+        }
+    };
+
+    let pos = match Position::from_str(&position) {
+        Some(p) => p,
+        None => {
+            print_error(&format!("Invalid position: {}", position));
+            return;
+        }
+    };
+
+    match situation {
+        Situation::RFI => {
+            // Show opener's open frequency from node 100
+            // Find any spot where this position is the opener
+            let spot = solution.spots.iter().find(|s| s.opener == pos);
+            match spot {
+                Some(spot) => {
+                    println!();
+                    println!(
+                        "  {} {} Open Range ({:.1}% of hands) | {}bb | Solved",
+                        "GTO".bold(),
+                        position,
+                        spot.open_pct(),
+                        stack_bb,
+                    );
+                    println!();
+                    println!("{}", strategy_grid(&spot.open_strategy, &format!(
+                        "{} Open Frequency (%)", position
+                    )));
+                    println!();
+                }
+                None => {
+                    print_error(&format!("No opening spot found for {}", position));
+                }
+            }
+        }
+        Situation::VsRFI | Situation::BbDefense => {
+            let vs_str = match vs {
+                Some(v) => match validate_position(&v, table_size) {
+                    Ok(p) => p,
+                    Err(e) => { print_error(&e); return; }
+                },
+                None => {
+                    print_error("--vs required for vs_RFI situation");
+                    return;
+                }
+            };
+
+            let vs_pos = match Position::from_str(&vs_str) {
+                Some(p) => p,
+                None => { print_error(&format!("Invalid position: {}", vs_str)); return; }
+            };
+
+            // Find spot where vs_pos is opener and pos is responder
+            let spot = solution.find_spot(vs_pos, pos);
+            match spot {
+                Some(spot) => {
+                    println!();
+                    println!(
+                        "  {} {} vs {} Open | {}bb | Solved",
+                        "GTO".bold(),
+                        position,
+                        vs_str,
+                        stack_bb,
+                    );
+                    println!();
+                    println!("{}", strategy_grid(&spot.vs_open_3bet, &format!(
+                        "{} 3-Bet Frequency (%) vs {} Open", position, vs_str
+                    )));
+                    println!();
+                    println!("{}", strategy_grid(&spot.vs_open_call, &format!(
+                        "{} Call Frequency (%) vs {} Open", position, vs_str
+                    )));
+                    println!();
+                    println!(
+                        "  3-Bet: {:.1}% | Flat: {:.1}%",
+                        spot.three_bet_pct(),
+                        spot.flat_call_pct(),
+                    );
+                    println!();
+                }
+                None => {
+                    print_error(&format!("No spot found for {} vs {} open", position, vs_str));
+                }
+            }
+        }
+        Situation::Vs3Bet => {
+            let vs_str = match vs {
+                Some(v) => match validate_position(&v, table_size) {
+                    Ok(p) => p,
+                    Err(e) => { print_error(&e); return; }
+                },
+                None => {
+                    print_error("--vs required for vs_3bet situation");
+                    return;
+                }
+            };
+
+            let vs_pos = match Position::from_str(&vs_str) {
+                Some(p) => p,
+                None => { print_error(&format!("Invalid position: {}", vs_str)); return; }
+            };
+
+            // Find spot where pos is opener and vs_pos is responder (who 3-bet)
+            let spot = solution.find_spot(pos, vs_pos);
+            match spot {
+                Some(spot) => {
+                    println!();
+                    println!(
+                        "  {} {} vs {} 3-Bet | {}bb | Solved",
+                        "GTO".bold(),
+                        position,
+                        vs_str,
+                        stack_bb,
+                    );
+                    println!();
+                    println!("{}", strategy_grid(&spot.vs_3bet_4bet, &format!(
+                        "{} 4-Bet Frequency (%) vs {} 3-Bet", position, vs_str
+                    )));
+                    println!();
+                    println!("{}", strategy_grid(&spot.vs_3bet_call, &format!(
+                        "{} Call Frequency (%) vs {} 3-Bet", position, vs_str
+                    )));
+                    println!();
+                }
+                None => {
+                    print_error(&format!("No spot found for {} vs {} 3-bet", position, vs_str));
+                }
+            }
         }
     }
 }

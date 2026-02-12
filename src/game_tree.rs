@@ -16,7 +16,7 @@ use crate::lookup_eval::evaluate_fast;
 use crate::ranges::combo_count;
 
 /// The 13 ranks in grid order: A, K, Q, J, T, 9, 8, 7, 6, 5, 4, 3, 2.
-const GRID_RANKS: [char; 13] = [
+pub const GRID_RANKS: [char; 13] = [
     'A', 'K', 'Q', 'J', 'T', '9', '8', '7', '6', '5', '4', '3', '2',
 ];
 

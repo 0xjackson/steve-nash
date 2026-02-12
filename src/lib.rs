@@ -12,4 +12,5 @@ pub mod multiway;
 pub mod play;
 pub mod postflop;
 pub mod preflop;
+pub mod preflop_solver;
 pub mod ranges;

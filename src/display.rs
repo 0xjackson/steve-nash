@@ -48,6 +48,42 @@ pub fn range_grid_strs(hands_in_range: &[&str], title: &str) -> String {
     range_grid(&owned, title)
 }
 
+/// Display a 13x13 grid showing action frequency percentages.
+/// `strategy` is a 169-element array indexed by bucket (row*13 + col).
+/// Cells are colored by frequency: green >70%, yellow 30-70%, dimmed <30%.
+pub fn strategy_grid(strategy: &[f64], title: &str) -> String {
+    let mut table = Table::new();
+    table.set_content_arrangement(ContentArrangement::Dynamic);
+
+    let mut header = vec![Cell::new("")];
+    for &r in &RANGE_GRID_RANKS {
+        header.push(Cell::new(r).set_alignment(CellAlignment::Center));
+    }
+    table.set_header(header);
+
+    for (i, &r1) in RANGE_GRID_RANKS.iter().enumerate() {
+        let mut row = vec![Cell::new(format!("{}", r1).bold().to_string())];
+        for (j, &_r2) in RANGE_GRID_RANKS.iter().enumerate() {
+            let bucket = i * 13 + j;
+            let freq = strategy[bucket];
+            let pct = (freq * 100.0).round() as u32;
+            let label = format!("{:>3}", pct);
+
+            let cell = if freq > 0.70 {
+                Cell::new(label.green().bold().to_string())
+            } else if freq > 0.30 {
+                Cell::new(label.yellow().to_string())
+            } else {
+                Cell::new(label.dimmed().to_string())
+            };
+            row.push(cell.set_alignment(CellAlignment::Center));
+        }
+        table.add_row(row);
+    }
+
+    format!("  {}\n{}", title.bold(), table)
+}
+
 pub fn equity_bar(equity: f64, width: usize) -> String {
     let filled = (equity * width as f64) as usize;
     let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(width - filled);

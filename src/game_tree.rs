@@ -317,6 +317,51 @@ impl PushFoldResult {
             .sum();
         combos / 1326.0 * 100.0
     }
+
+    /// Display the solver results: push/call grids and summary stats.
+    pub fn display(&self) {
+        use colored::Colorize;
+        use crate::display::{range_grid, strategy_grid};
+
+        println!();
+        println!(
+            "  {} Push/Fold Solution  |  Stack: {}bb  |  {} iterations  |  Exploitability: {:.4} bb",
+            "GTO".bold(),
+            self.stack_bb,
+            self.iterations,
+            self.exploitability,
+        );
+
+        // SB push range
+        let push_range = self.push_range();
+        println!();
+        println!("{}", range_grid(&push_range, &format!(
+            "SB Push Range ({:.1}% of hands)", self.push_pct()
+        )));
+
+        // SB push frequency grid
+        println!();
+        println!("{}", strategy_grid(
+            &self.push_strategy,
+            "SB Push Frequency (%)",
+        ));
+
+        // BB call range
+        let call_range = self.call_range();
+        println!();
+        println!("{}", range_grid(&call_range, &format!(
+            "BB Call Range ({:.1}% of hands)", self.call_pct()
+        )));
+
+        // BB call frequency grid
+        println!();
+        println!("{}", strategy_grid(
+            &self.call_strategy,
+            "BB Call Frequency (%)",
+        ));
+
+        println!();
+    }
 }
 
 /// Solve the push/fold game for a given stack depth using CFR+.

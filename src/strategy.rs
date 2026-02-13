@@ -1,7 +1,10 @@
 //! Strategy lookup engine — queries solver output to answer:
 //! "Given this hand + position + board, what are the GTO action frequencies?"
 
-use crate::flop_solver::{FlopSolverConfig, FlopSolution, solve_flop};
+use crate::bucketing::assign_buckets;
+use crate::card_encoding::card_to_index;
+use crate::cards::parse_board;
+use crate::flop_solver::{FlopSolverConfig, FlopSolution, TemplateBucketStrategy, solve_flop};
 use crate::preflop_solver::{Position, PreflopSolution, PreflopSpotResult};
 use crate::river_solver::{RiverSolverConfig, RiverSolution, solve_river};
 use crate::turn_solver::{TurnSolverConfig, TurnSolution, solve_turn};
@@ -320,10 +323,24 @@ impl StrategyEngine {
         oop_pos: &str,
         ip_pos: &str,
     ) -> Result<StrategyResult, String> {
+        // 1. Check dedicated turn cache
         if let Some(solution) = TurnSolution::load_cache(board, oop_pos, ip_pos, pot, stack) {
             return lookup_in_turn_solution(&solution, hand, hero_side);
         }
 
+        // 2. Check flop solution for embedded turn template strategies
+        let flop_board = &board[..6];
+        if let Some(flop_sol) = FlopSolution::load_cache(flop_board, oop_pos, ip_pos, pot, stack) {
+            if !flop_sol.turn_strategies.is_empty() {
+                if let Ok(result) = lookup_in_template_strategy(
+                    &flop_sol, hand, hero_side, board, &flop_sol.turn_strategies,
+                ) {
+                    return Ok(result);
+                }
+            }
+        }
+
+        // 3. Solve on-demand
         eprintln!("  Solving turn {} (this may take 15-45s)...", board);
         let config = TurnSolverConfig::new(board, oop_range, ip_range, pot, stack, iterations)?;
         let mut solution = solve_turn(&config);
@@ -347,10 +364,24 @@ impl StrategyEngine {
         oop_pos: &str,
         ip_pos: &str,
     ) -> Result<StrategyResult, String> {
+        // 1. Check dedicated river cache
         if let Some(solution) = RiverSolution::load_cache(board, oop_pos, ip_pos, pot, stack) {
             return lookup_in_river_solution(&solution, hand, hero_side);
         }
 
+        // 2. Check flop solution for embedded river template strategies
+        let flop_board = &board[..6];
+        if let Some(flop_sol) = FlopSolution::load_cache(flop_board, oop_pos, ip_pos, pot, stack) {
+            if !flop_sol.river_strategies.is_empty() {
+                if let Ok(result) = lookup_in_template_strategy(
+                    &flop_sol, hand, hero_side, board, &flop_sol.river_strategies,
+                ) {
+                    return Ok(result);
+                }
+            }
+        }
+
+        // 3. Solve on-demand
         eprintln!("  Solving river {} (this may take 1-5s)...", board);
         let config = RiverSolverConfig::new(board, oop_range, ip_range, pot, stack, iterations)?;
         let mut solution = solve_river(&config);
@@ -470,6 +501,69 @@ fn lookup_in_river_solution(
     }
 
     Err("No strategy found for hero's side at root node".to_string())
+}
+
+/// Look up a hand's strategy from template bucket strategies embedded in a flop solution.
+///
+/// 1. Parse the full board to card indices
+/// 2. Find the hand combo in the flop solution's combo list
+/// 3. Compute the hand's bucket on this specific board
+/// 4. Look up the bucket's strategy in the template strategies
+fn lookup_in_template_strategy(
+    flop_sol: &FlopSolution,
+    hand: &str,
+    hero_side: &str,
+    board: &str,
+    template_strategies: &[TemplateBucketStrategy],
+) -> Result<StrategyResult, String> {
+    if flop_sol.num_buckets == 0 {
+        return Err("No bucket info in flop solution".to_string());
+    }
+
+    // Parse hand to card indices
+    let hand_cards = parse_board(hand).map_err(|e| format!("{}", e))?;
+    if hand_cards.len() != 2 {
+        return Err("Hand must be exactly 2 cards".to_string());
+    }
+    let h0 = card_to_index(&hand_cards[0]);
+    let h1 = card_to_index(&hand_cards[1]);
+
+    // Check the hand is in the flop solution's range
+    let combos = if hero_side == "OOP" {
+        &flop_sol.oop_combos
+    } else {
+        &flop_sol.ip_combos
+    };
+    if find_combo_index(hand, combos).is_none() {
+        return Ok(StrategyResult {
+            actions: vec![],
+            frequencies: vec![],
+            source: StrategySource::NotInRange,
+        });
+    }
+
+    // Parse board to card indices
+    let board_cards = parse_board(board).map_err(|e| format!("{}", e))?;
+    let board_indices: Vec<u8> = board_cards.iter().map(|c| card_to_index(c)).collect();
+
+    // Compute bucket for this hand on this board
+    // num_samples: 200 for turn (4 cards), 0 for river (5 cards — exact equity)
+    let num_samples = if board_indices.len() == 4 { 200 } else { 0 };
+    let buckets = assign_buckets(&[(h0, h1)], &board_indices, flop_sol.num_buckets, num_samples);
+    let bucket = buckets[0] as usize;
+
+    // Find first strategy node matching hero's side
+    for strat in template_strategies {
+        if strat.player == hero_side && bucket < strat.frequencies.len() {
+            return Ok(StrategyResult {
+                actions: strat.actions.clone(),
+                frequencies: strat.frequencies[bucket].clone(),
+                source: StrategySource::Cached,
+            });
+        }
+    }
+
+    Err("No template strategy found for hero's side".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -644,5 +738,74 @@ mod tests {
             source: StrategySource::NotInRange,
         };
         assert!(format_strategy(&result).contains("not in range"));
+    }
+
+    #[test]
+    fn test_lookup_in_template_strategy_not_in_range() {
+        let flop_sol = FlopSolution {
+            board: "Ks9d4c".to_string(),
+            oop_range: vec!["AKs".to_string()],
+            ip_range: vec!["QQ".to_string()],
+            starting_pot: 6.0,
+            effective_stack: 97.0,
+            iterations: 100,
+            exploitability: 0.0,
+            oop_combos: vec!["AhKh".to_string(), "AdKd".to_string()],
+            ip_combos: vec!["QhQc".to_string()],
+            strategies: vec![],
+            oop_pos: "BB".to_string(),
+            ip_pos: "BTN".to_string(),
+            turn_strategies: vec![TemplateBucketStrategy {
+                node_id: 0,
+                player: "OOP".to_string(),
+                actions: vec!["Check".to_string(), "Bet 0.7".to_string()],
+                frequencies: vec![vec![0.6, 0.4]; 200],
+            }],
+            river_strategies: vec![],
+            num_buckets: 200,
+        };
+        // Hand not in range → NotInRange
+        let result = lookup_in_template_strategy(
+            &flop_sol, "2h3c", "OOP", "Ks9d4c7h",
+            &flop_sol.turn_strategies,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().source, StrategySource::NotInRange);
+    }
+
+    #[test]
+    fn test_lookup_in_template_strategy_finds_bucket() {
+        let flop_sol = FlopSolution {
+            board: "Ks9d4c".to_string(),
+            oop_range: vec!["AKs".to_string()],
+            ip_range: vec!["QQ".to_string()],
+            starting_pot: 6.0,
+            effective_stack: 97.0,
+            iterations: 100,
+            exploitability: 0.0,
+            oop_combos: vec!["AhKh".to_string(), "AdKd".to_string()],
+            ip_combos: vec!["QhQc".to_string()],
+            strategies: vec![],
+            oop_pos: "BB".to_string(),
+            ip_pos: "BTN".to_string(),
+            turn_strategies: vec![TemplateBucketStrategy {
+                node_id: 0,
+                player: "OOP".to_string(),
+                actions: vec!["Check".to_string(), "Bet 0.7".to_string()],
+                frequencies: vec![vec![0.6, 0.4]; 200],
+            }],
+            river_strategies: vec![],
+            num_buckets: 200,
+        };
+        // Hand IS in range → should get a strategy back
+        let result = lookup_in_template_strategy(
+            &flop_sol, "AhKh", "OOP", "Ks9d4c7h",
+            &flop_sol.turn_strategies,
+        );
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.source, StrategySource::Cached);
+        assert_eq!(r.actions.len(), 2);
+        assert_eq!(r.frequencies.len(), 2);
     }
 }

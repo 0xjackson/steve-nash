@@ -96,6 +96,17 @@ pub struct FlopNodeStrategy {
     pub frequencies: Vec<Vec<f64>>,
 }
 
+/// Bucket-level strategy from a template tree (turn or river within flop solve).
+/// Same shape as FlopNodeStrategy but indexed by bucket instead of combo.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemplateBucketStrategy {
+    pub node_id: u16,
+    pub player: String,
+    pub actions: Vec<String>,
+    /// Average strategy frequencies: [bucket_idx][action_idx].
+    pub frequencies: Vec<Vec<f64>>,
+}
+
 /// Full solution from the flop solver.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FlopSolution {
@@ -116,6 +127,15 @@ pub struct FlopSolution {
     /// IP position label (e.g. "BTN") — used in cache key.
     #[serde(default)]
     pub ip_pos: String,
+    /// Turn template strategies at bucket level (from flop MCCFR training).
+    #[serde(default)]
+    pub turn_strategies: Vec<TemplateBucketStrategy>,
+    /// River template strategies at bucket level (from flop MCCFR training).
+    #[serde(default)]
+    pub river_strategies: Vec<TemplateBucketStrategy>,
+    /// Number of buckets used for turn/river template strategies.
+    #[serde(default)]
+    pub num_buckets: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -2504,6 +2524,24 @@ fn extract_solution(
         &mut strategies,
     );
 
+    // Extract turn/river template strategies at bucket level (zero extra compute)
+    let mut turn_strategies = Vec::new();
+    extract_template_strategies(
+        turn_template,
+        turn_oop_cfr,
+        turn_ip_cfr,
+        config.num_buckets,
+        &mut turn_strategies,
+    );
+    let mut river_strategies = Vec::new();
+    extract_template_strategies(
+        river_template,
+        river_oop_cfr,
+        river_ip_cfr,
+        config.num_buckets,
+        &mut river_strategies,
+    );
+
     let board_str = config
         .board
         .iter()
@@ -2532,6 +2570,9 @@ fn extract_solution(
         strategies,
         oop_pos: String::new(),
         ip_pos: String::new(),
+        turn_strategies,
+        river_strategies,
+        num_buckets: config.num_buckets,
     }
 }
 
@@ -2597,6 +2638,59 @@ fn extract_flop_strategies(
     }
 }
 
+/// Extract bucket-level strategies from a template tree (turn or river).
+///
+/// Walks the tree and for each action node, reads the average strategy from
+/// the corresponding FlatCfr at each bucket index.
+fn extract_template_strategies(
+    node: &TreeNode,
+    oop_cfr: &FlatCfr,
+    ip_cfr: &FlatCfr,
+    num_buckets: usize,
+    strategies: &mut Vec<TemplateBucketStrategy>,
+) {
+    match node {
+        TreeNode::Action {
+            node_id,
+            player,
+            children,
+            actions,
+            ..
+        } => {
+            let num_actions = actions.len();
+            let nid = *node_id as usize;
+            let cfr = match player {
+                Player::OOP => oop_cfr,
+                Player::IP => ip_cfr,
+            };
+
+            let mut avg_buf = vec![0.0f32; num_actions];
+            let frequencies: Vec<Vec<f64>> = (0..num_buckets)
+                .map(|b| {
+                    cfr.average_strategy(nid, b, &mut avg_buf);
+                    avg_buf[..num_actions].iter().map(|&v| v as f64).collect()
+                })
+                .collect();
+
+            strategies.push(TemplateBucketStrategy {
+                node_id: *node_id,
+                player: match player {
+                    Player::OOP => "OOP".to_string(),
+                    Player::IP => "IP".to_string(),
+                },
+                actions: actions.iter().map(|a| a.label()).collect(),
+                frequencies,
+            });
+
+            for child in children {
+                extract_template_strategies(child, oop_cfr, ip_cfr, num_buckets, strategies);
+            }
+        }
+        TreeNode::Terminal { .. } => {}
+        TreeNode::Chance { .. } => {}
+    }
+}
+
 fn empty_solution(config: &FlopSolverConfig) -> FlopSolution {
     let board_str = config
         .board
@@ -2617,6 +2711,9 @@ fn empty_solution(config: &FlopSolverConfig) -> FlopSolution {
         strategies: vec![],
         oop_pos: String::new(),
         ip_pos: String::new(),
+        turn_strategies: vec![],
+        river_strategies: vec![],
+        num_buckets: 0,
     }
 }
 

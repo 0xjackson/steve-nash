@@ -143,17 +143,25 @@ pub fn strategic_priority(board: &str) -> u32 {
     let is_paired = r1 == r2 || r2 == r3 || r1 == r3;
     let is_broadway = r1 >= 10 && r2 >= 10 && r3 >= 10;
 
+    let is_trips = r1 == r2 && r2 == r3;
+
+    // Trips boards (AAA, KKK, etc.) are extremely rare (~0.02%) — solve last
+    if is_trips {
+        return 10;
+    }
+
     // Base score from high card (A=14 -> 1400, K=13 -> 1300, etc.)
     let mut score = high as u32 * 100;
 
-    // Bonus for broadway boards
-    if is_broadway {
-        score += 50;
+    // Unpaired boards are far more common (~83%) and strategically diverse
+    // Paired boards (~17%) are important but less urgent
+    if is_paired {
+        score -= 200;
     }
 
-    // Bonus for paired boards
-    if is_paired {
-        score += 30;
+    // Bonus for broadway boards (frequent, complex strategy)
+    if is_broadway {
+        score += 50;
     }
 
     // Penalty for monotone (less common, different strategy)
@@ -287,5 +295,42 @@ mod tests {
         let broadway = strategic_priority("KsQhTd");
         let non_broadway = strategic_priority("Ks7d2c");
         assert!(broadway > non_broadway, "Broadway board should have higher priority");
+    }
+
+    #[test]
+    fn test_strategic_priority_unpaired_before_paired() {
+        let unpaired = strategic_priority("As7d2c");
+        let paired = strategic_priority("AsAh7d");
+        assert!(unpaired > paired, "Unpaired A-high should beat paired aces");
+    }
+
+    #[test]
+    fn test_strategic_priority_trips_last() {
+        let trips = strategic_priority("AsAhAd");
+        let low_unpaired = strategic_priority("5s4d2c");
+        assert!(trips < low_unpaired, "Trips board should be lower priority than any unpaired");
+    }
+
+    #[test]
+    fn test_top_boards_are_unpaired_high_cards() {
+        let mut flops = generate_canonical_flops();
+        flops.sort_by(|a, b| strategic_priority(b).cmp(&strategic_priority(a)));
+
+        // Top 20 should all be unpaired
+        for board in &flops[..20] {
+            let chars: Vec<char> = board.chars().collect();
+            let r1 = rank_value(chars[0]);
+            let r2 = rank_value(chars[2]);
+            let r3 = rank_value(chars[4]);
+            assert!(
+                r1 != r2 && r2 != r3 && r1 != r3,
+                "Top board '{}' should be unpaired", board
+            );
+        }
+
+        // Top board should be A-high
+        let top = &flops[0];
+        let r1 = rank_value(top.chars().nth(0).unwrap());
+        assert_eq!(r1, 14, "Top board should be A-high, got '{}'", top);
     }
 }

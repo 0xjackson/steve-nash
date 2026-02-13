@@ -19,4 +19,5 @@ pub mod ranges;
 pub mod bucketing;
 pub mod flop_solver;
 pub mod river_solver;
+pub mod strategy;
 pub mod turn_solver;

@@ -20,6 +20,7 @@ mod preflop;
 mod preflop_solver;
 mod ranges;
 mod river_solver;
+mod strategy;
 mod turn_solver;
 
 fn main() {

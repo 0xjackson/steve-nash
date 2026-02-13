@@ -1,3 +1,4 @@
+pub mod batch;
 pub mod card_encoding;
 pub mod cards;
 pub mod cfr;

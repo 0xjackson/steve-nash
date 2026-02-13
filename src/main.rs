@@ -1,3 +1,4 @@
+mod batch;
 mod bucketing;
 mod card_encoding;
 mod cards;

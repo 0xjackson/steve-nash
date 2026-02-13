@@ -362,6 +362,21 @@ enum SolverCommands {
         #[arg(short, long, default_value = "500000")]
         iterations: usize,
     },
+    /// Batch pre-solve flop spots across positions and boards
+    Batch {
+        /// Stack depth in big blinds
+        #[arg(short, long, default_value = "100")]
+        stack: f64,
+        /// Only solve single raised pots (skip 3-bet pots)
+        #[arg(long)]
+        srp_only: bool,
+        /// Number of MCCFR iterations per spot
+        #[arg(short, long, default_value = "500000")]
+        iterations: usize,
+        /// Maximum number of spots to solve
+        #[arg(long)]
+        limit: Option<usize>,
+    },
 }
 
 fn validate_position(pos: &str, table_size: &str) -> Result<String, String> {
@@ -513,6 +528,12 @@ fn dispatch(cli: Cli) {
                 stack,
                 iterations,
             } => cmd_solve_flop(board, oop, ip, pot, stack, iterations),
+            SolverCommands::Batch {
+                stack,
+                srp_only,
+                iterations,
+                limit,
+            } => crate::batch::run_batch_solve(stack, srp_only, limit, iterations),
         },
     }
 }

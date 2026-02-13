@@ -1,6 +1,7 @@
 //! Batch pre-solve: generates a manifest of position × board × pot-type spots
 //! and solves them sequentially with resumability (skips existing cache files).
 
+use std::io::Write;
 use std::time::Instant;
 
 use colored::Colorize;
@@ -232,6 +233,7 @@ pub fn run_batch_solve(stack: f64, srp_only: bool, limit: Option<usize>, iterati
             spot.responder.as_str(),
             spot.pot_type.as_str(),
         );
+        let _ = std::io::stdout().flush();
 
         let spot_start = Instant::now();
 

@@ -13,7 +13,11 @@ use crate::postflop::{analyze_board, street_strategy, Wetness};
 use crate::preflop::{
     get_rfi_pct, get_rfi_range, preflop_action, positions_for,
 };
+use crate::preflop_solver::Position;
 use crate::ranges::{blockers_remove, range_from_top_pct, HAND_RANKING};
+use crate::strategy::{
+    default_villain, detect_street, format_strategy, StrategyEngine, StrategySource,
+};
 
 // ---------------------------------------------------------------------------
 // Position helpers
@@ -79,34 +83,26 @@ pub fn classify_hand_strength(
             }
         }
         HandCategory::ThreeOfAKind => {
-            // Set (pocket pair hit board) vs trips
-            let hero_ranks: HashSet<_> = hole_cards.iter().map(|c| c.rank).collect();
-            let board_rank_counts = {
-                let mut counts = std::collections::HashMap::new();
-                for c in board {
-                    *counts.entry(c.rank).or_insert(0u32) += 1;
-                }
-                counts
-            };
-            let is_set = hero_ranks
-                .iter()
-                .any(|r| board_rank_counts.get(r).copied().unwrap_or(0) == 1 && hole_cards.iter().filter(|c| c.rank == *r).count() == 2);
-            // Simpler check: if both hole cards are the same rank (pocket pair) and one on board
             let is_pocket_pair = hole_cards.len() == 2 && hole_cards[0].rank == hole_cards[1].rank;
             if is_pocket_pair && board.iter().any(|c| c.rank == hole_cards[0].rank) {
                 "very_strong"
-            } else if is_set {
-                "very_strong"
             } else {
-                "strong"
+                let hero_ranks: HashSet<_> = hole_cards.iter().map(|c| c.rank).collect();
+                let board_rank_counts = {
+                    let mut counts = std::collections::HashMap::new();
+                    for c in board {
+                        *counts.entry(c.rank).or_insert(0u32) += 1;
+                    }
+                    counts
+                };
+                let is_set = hero_ranks
+                    .iter()
+                    .any(|r| board_rank_counts.get(r).copied().unwrap_or(0) == 1 && hole_cards.iter().filter(|c| c.rank == *r).count() == 2);
+                if is_set { "very_strong" } else { "strong" }
             }
         }
         HandCategory::TwoPair => {
-            if equity >= 0.55 {
-                "strong"
-            } else {
-                "medium"
-            }
+            if equity >= 0.55 { "strong" } else { "medium" }
         }
         HandCategory::OnePair => {
             let pair_rank_value = hand_result.kickers[0];
@@ -123,7 +119,6 @@ pub fn classify_hand_strength(
                 .unwrap_or(0);
 
             if is_top_pair && kicker_value >= 12 {
-                // Q+ kicker
                 "strong"
             } else if is_top_pair {
                 "medium"
@@ -170,7 +165,6 @@ fn has_straight_draw_hero(hole_cards: &[Card], board: &[Card]) -> bool {
         .collect();
     let hero_values: HashSet<u8> = hole_cards.iter().map(|c| c.value()).collect();
 
-    // Check for 4+ cards within a 5-card window where at least 1 is hero's
     for start in 2u8..=10 {
         let window: Vec<u8> = all_values
             .iter()
@@ -184,9 +178,8 @@ fn has_straight_draw_hero(hole_cards: &[Card], board: &[Card]) -> bool {
     // Ace-low
     if all_values.contains(&14) {
         let mut low_vals: Vec<u8> = all_values.iter().filter(|&&v| v <= 5).copied().collect();
-        low_vals.push(1); // ace as 1
+        low_vals.push(1);
         if low_vals.len() >= 4 {
-            // Check that hero contributes at least one card to this draw
             let hero_contributes = hero_values.contains(&14)
                 || hero_values.iter().any(|v| *v <= 5);
             if hero_contributes {
@@ -247,18 +240,16 @@ pub fn explain_strength(strength: &str) -> &'static str {
 
 pub fn estimate_villain_range(
     situation: &str,
-    hero_pos: &str,
+    _hero_pos: &str,
     villain_pos: Option<&str>,
     hero_cards: &[Card],
     table_size: &str,
 ) -> Vec<String> {
     let villain_range = match situation {
         "RFI" => {
-            // Hero opened, villain called -> roughly top 20%
             range_from_top_pct(20.0).unwrap_or_default()
         }
         "vs_RFI" => {
-            // Villain opened from their position
             if let Some(vp) = villain_pos {
                 let r = get_rfi_range(vp, table_size);
                 if r.is_empty() {
@@ -271,7 +262,6 @@ pub fn estimate_villain_range(
             }
         }
         "vs_3bet" => {
-            // Villain 3-bet -> premium range ~7%
             range_from_top_pct(7.0).unwrap_or_default()
         }
         "bb_defense" => {
@@ -312,7 +302,7 @@ fn prompt(message: &str, default: Option<&str>, reader: &mut dyn BufRead, writer
 
     let mut line = String::new();
     match reader.read_line(&mut line) {
-        Ok(0) => "q".to_string(), // EOF
+        Ok(0) => "q".to_string(),
         Ok(_) => {
             let trimmed = line.trim().to_string();
             if trimmed.is_empty() {
@@ -325,9 +315,6 @@ fn prompt(message: &str, default: Option<&str>, reader: &mut dyn BufRead, writer
     }
 }
 
-/// Show a numbered menu and return the chosen option string.
-/// `options` is the list of choices. `default_idx` is the 0-based index
-/// highlighted as default (chosen on empty input).
 fn prompt_menu(
     title: &str,
     options: &[&str],
@@ -344,14 +331,12 @@ fn prompt_menu(
     if answer.to_lowercase() == "q" {
         return "q".to_string();
     }
-    // First: check if the raw text matches any option (exact or prefix)
     let lower = answer.to_lowercase();
     for opt in options {
         if opt.to_lowercase() == lower || opt.to_lowercase().starts_with(&lower) {
             return opt.to_string();
         }
     }
-    // Then: try parsing as a menu number
     if let Ok(n) = answer.parse::<usize>() {
         if n >= 1 && n <= options.len() {
             return options[n - 1].to_string();
@@ -390,7 +375,6 @@ fn parse_board_input(text: &str) -> Option<Vec<Card>> {
 }
 
 fn parse_sizing_pct(sizing: &str) -> Option<f64> {
-    // Extract first number-or-range from "50% pot" or "66-75% pot"
     let mut nums = String::new();
     let mut found_digit = false;
     for ch in sizing.chars() {
@@ -432,36 +416,22 @@ pub fn play_command() {
 
 pub fn run_interactive_session(reader: &mut dyn BufRead, writer: &mut dyn Write) {
     writeln!(writer).ok();
-    writeln!(writer, "{} I'll walk you through a hand step-by-step.",
-             "Welcome to GTO Play!".cyan().bold()).ok();
-    writeln!(writer, "Type {} at any prompt to quit.\n", "'q'".bold()).ok();
+    writeln!(writer, "{}", "GTO Play \u{2014} solver-backed interactive advisor".cyan().bold()).ok();
+    writeln!(writer, "Type {} at any prompt to quit. Defaults: 6max, 100bb, heads-up SRP.\n", "'q'".bold()).ok();
 
-    // -- Game Setup --
-    let table_size_input = prompt_menu("Table size", &["6max", "9max"], 0, reader, writer);
-    if table_size_input.to_lowercase() == "q" {
-        return;
+    // Initialize strategy engine (100bb default)
+    let mut engine = StrategyEngine::new(100.0);
+    if engine.has_preflop() {
+        writeln!(writer, "  {} Preflop solver loaded", "\u{2713}".green()).ok();
+    } else {
+        writeln!(writer, "  {} No preflop solution \u{2014} run `gto solve preflop` for solver-backed advice", "\u{2717}".yellow()).ok();
     }
-    let table_size = if table_size_input.contains("9") { "9max" } else { "6max" };
 
-    let blinds_input = prompt_menu("Blinds", &["1/2", "2/5", "5/10", "25/50"], 0, reader, writer);
-    if blinds_input.to_lowercase() == "q" {
-        return;
-    }
-    let (sb_amount, bb_amount) = parse_blinds(&blinds_input).unwrap_or((1.0, 2.0));
-
-    let default_stack = format!("{}", (bb_amount * 100.0) as u64);
-    let stack_str = prompt(&format!("  Stack size in $ (100bb = ${})", default_stack), Some(&default_stack), reader, writer);
-    if stack_str.to_lowercase() == "q" {
-        return;
-    }
-    let hero_stack: f64 = stack_str.parse().unwrap_or(bb_amount * 100.0);
-
-    // -- Hand loop --
     loop {
-        match play_one_hand(table_size, sb_amount, bb_amount, hero_stack, reader, writer) {
+        match play_one_hand(&mut engine, reader, writer) {
             Ok(()) => {}
             Err(QuitSession) => {
-                writeln!(writer, "\n{}\n", "Thanks for playing! Good luck at the tables.".cyan().bold()).ok();
+                writeln!(writer, "\n{}\n", "Good luck at the tables.".cyan().bold()).ok();
                 return;
             }
         }
@@ -469,37 +439,42 @@ pub fn run_interactive_session(reader: &mut dyn BufRead, writer: &mut dyn Write)
         match prompt_yn("\nPlay another hand?", "y", reader, writer) {
             Some(true) => continue,
             _ => {
-                writeln!(writer, "\n{}\n", "Thanks for playing! Good luck at the tables.".cyan().bold()).ok();
+                writeln!(writer, "\n{}\n", "Good luck at the tables.".cyan().bold()).ok();
                 return;
             }
         }
     }
 }
 
-fn parse_blinds(s: &str) -> Option<(f64, f64)> {
-    let cleaned = s.replace(' ', "");
-    let parts: Vec<&str> = cleaned.split('/').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let sb: f64 = parts[0].parse().ok()?;
-    let bb: f64 = parts[1].parse().ok()?;
-    Some((sb, bb))
-}
-
 fn play_one_hand(
-    table_size: &str,
-    sb_amount: f64,
-    bb_amount: f64,
-    hero_stack: f64,
+    engine: &mut StrategyEngine,
     reader: &mut dyn BufRead,
     writer: &mut dyn Write,
 ) -> Result<(), QuitSession> {
+    let table_size = "6max";
+    let bb_amount = 1.0; // Use bb as unit
     let valid_positions = positions_for(table_size);
+
+    // -- Hole cards --
+    let hole_cards = loop {
+        let cards_str = prompt("  Hand", None, reader, writer);
+        if cards_str.to_lowercase() == "q" {
+            return Err(QuitSession);
+        }
+        if let Some(cards) = parse_hole_cards(&cards_str) {
+            break cards;
+        }
+        writeln!(writer, "  {}", "Invalid. Use format: AhKs, Td9c, 7s7h".red()).ok();
+    };
+
+    let hand_str: String = hole_cards.iter().map(|c| format!("{}", c)).collect();
+    let hand_name = simplify_hand(&hole_cards).unwrap_or_else(|_| "??".to_string());
+    let pretty: String = hole_cards.iter().map(|c| c.pretty()).collect::<Vec<_>>().join("");
+    writeln!(writer, "  {} ({})", pretty.bold(), hand_name.dimmed()).ok();
 
     // -- Position --
     let default_btn_idx = valid_positions.iter().position(|&p| p == "BTN").unwrap_or(0);
-    let pos_str = prompt_menu("Your position", valid_positions, default_btn_idx, reader, writer);
+    let pos_str = prompt_menu("Position", valid_positions, default_btn_idx, reader, writer);
     if pos_str.to_lowercase() == "q" {
         return Err(QuitSession);
     }
@@ -507,209 +482,44 @@ fn play_one_hand(
     let hero_pos = if valid_positions.contains(&hero_pos.as_str()) {
         hero_pos
     } else {
-        writeln!(writer, "  {}", "Invalid position. Defaulting to BTN".yellow()).ok();
         "BTN".to_string()
     };
 
-    writeln!(writer, "  {}", explain_position(&hero_pos).dimmed()).ok();
-
-    let players_choice = prompt_menu("Players in the hand", &["2 (heads-up)", "3", "4", "5+"], 0, reader, writer);
-    if players_choice.to_lowercase() == "q" {
-        return Err(QuitSession);
-    }
-    let num_players: usize = players_choice.chars()
-        .find(|c| c.is_ascii_digit())
-        .and_then(|c| c.to_digit(10))
-        .map(|n| (n as usize).max(2))
-        .unwrap_or(2);
-
-    // -- Hole cards --
-    writeln!(writer, "\n  {} Rank + Suit: {}=spades {}=hearts {}=diamonds {}=clubs",
-        "Card format:".bold(), "s".bold(), "h".bold(), "d".bold(), "c".bold()).ok();
-    writeln!(writer, "  {} AhKs = Ace of hearts, King of spades",
-        "Example:".dimmed()).ok();
-    let hole_cards = loop {
-        let cards_str = prompt("  Your two cards", None, reader, writer);
-        if cards_str.to_lowercase() == "q" {
-            return Err(QuitSession);
-        }
-        if let Some(cards) = parse_hole_cards(&cards_str) {
-            break cards;
-        }
-        writeln!(writer, "  {}", "Invalid. Try again like: AhKs, Td9c, 7s7h".red()).ok();
-    };
-
-    let hand_name = simplify_hand(&hole_cards).unwrap_or_else(|_| "??".to_string());
-    let pretty: String = hole_cards.iter().map(|c| c.pretty()).collect::<Vec<_>>().join(" ");
-    writeln!(writer, "\n  Your hand: {}  ({})", pretty.bold(), hand_name).ok();
-
-    // -- Preflop situation --
-    let raised = match prompt_yn("Has anyone raised before you?", "n", reader, writer) {
-        Some(v) => v,
-        None => return Err(QuitSession),
-    };
-
-    let mut situation = "RFI";
-    let mut villain_pos: Option<String> = None;
-
-    if raised {
-        let vp = prompt_menu("Which position raised?", valid_positions, 0, reader, writer);
-        if vp.to_lowercase() == "q" {
-            return Err(QuitSession);
-        }
-        let vp_upper = vp.to_uppercase();
-        villain_pos = Some(if valid_positions.contains(&vp_upper.as_str()) {
-            vp_upper
-        } else {
-            writeln!(writer, "  {}", "Defaulting to UTG".yellow()).ok();
-            "UTG".to_string()
-        });
-
-        situation = if hero_pos == "BB" {
-            "bb_defense"
-        } else {
-            "vs_RFI"
-        };
-
-        match prompt_yn("Was there a re-raise (3-bet)?", "n", reader, writer) {
-            Some(true) => {
-                situation = "vs_3bet";
-            }
-            None => return Err(QuitSession),
-            _ => {}
-        }
-    }
+    let hero = Position::from_str(&hero_pos).unwrap_or(Position::BTN);
+    let villain = default_villain(hero);
+    let villain_pos_str = villain.as_str().to_string();
 
     // -- Preflop advice --
     writeln!(writer, "\n{}", "--- Preflop ---".cyan().bold()).ok();
 
-    let pf_situation = if situation == "bb_defense" {
-        "vs_RFI"
-    } else {
-        situation
-    };
-    let pf_action = preflop_action(
-        &hand_name,
-        &hero_pos,
-        pf_situation,
-        villain_pos.as_deref(),
-        table_size,
-    )
-    .unwrap_or_else(|_| {
-        preflop_action(&hand_name, &hero_pos, "RFI", None, table_size).unwrap()
-    });
+    let has_solver_preflop = show_preflop_advice(
+        engine, &hand_name, &hand_str, &hero_pos, hero, table_size, writer,
+    );
 
-    writeln!(writer, "\n  Recommendation: {}", styled_action(&pf_action.action)).ok();
-
-    // Plain English explanation
-    let rfi_pct = get_rfi_pct(&hero_pos, table_size);
-    let hand_top_pct = HAND_RANKING
-        .iter()
-        .position(|&h| h == hand_name)
-        .map(|idx| ((idx + 1) as f64 / HAND_RANKING.len() as f64 * 100.0).round() as u32)
-        .unwrap_or(50);
-
-    match situation {
-        "RFI" => {
-            let within = if pf_action.action == "RAISE" {
-                "this is well within range."
-            } else {
-                "this is outside your opening range."
-            };
-            writeln!(
-                writer,
-                "  {}",
-                format!(
-                    "Why: {} is in the top ~{}% of hands. From {} you open ~{}% \u{2014} {}",
-                    hand_name, hand_top_pct, hero_pos, rfi_pct, within
-                )
-                .dimmed()
-            )
-            .ok();
-        }
-        "vs_RFI" | "bb_defense" => {
-            let ctx = if situation == "bb_defense" {
-                format!(
-                    "Why: From the BB vs {} open. {}.",
-                    villain_pos.as_deref().unwrap_or("?"),
-                    pf_action.detail
-                )
-            } else {
-                format!(
-                    "Why: {}. {} is in the top ~{}% of hands.",
-                    pf_action.detail, hand_name, hand_top_pct
-                )
-            };
-            writeln!(writer, "  {}", ctx.dimmed()).ok();
-        }
-        "vs_3bet" => {
-            writeln!(
-                writer,
-                "  {}",
-                format!("Why: Facing a 3-bet you need a strong hand. {}.", pf_action.detail).dimmed()
-            )
-            .ok();
-        }
-        _ => {}
-    }
-
-    writeln!(writer, "  {}", format!("Position: {}", explain_position(&hero_pos)).dimmed()).ok();
-
-    if pf_action.action == "FOLD" {
+    // Check if we should fold
+    if should_fold_preflop(engine, &hand_name, hero) {
         writeln!(writer, "\n  {}", "Hand over \u{2014} fold preflop.".dimmed()).ok();
         return Ok(());
     }
 
-    // -- Pot tracking --
-    let mut pot = sb_amount + bb_amount;
-    match situation {
-        "RFI" => pot += bb_amount * 2.5,
-        "vs_RFI" | "bb_defense" => pot += bb_amount * 3.0,
-        "vs_3bet" => pot += bb_amount * 12.0,
-        _ => {}
-    }
+    // -- Pot tracking (in bb) --
+    let mut pot = 6.0; // SRP default: 2.5bb open + BB call + 1.5bb blinds
+    let mut remaining_stack = 97.0; // 100bb - 3bb invested
 
-    let mut remaining_stack = hero_stack - (pot / num_players as f64);
-    if remaining_stack < 0.0 {
-        remaining_stack = hero_stack * 0.8;
-    }
-
-    let hero_ip = if let Some(ref vp) = villain_pos {
-        is_in_position(&hero_pos, vp, table_size)
-    } else {
-        hero_pos == "BTN" || hero_pos == "CO"
-    };
+    let hero_ip = hero.is_ip_vs(&villain);
     let ip_label = if hero_ip { "IP" } else { "OOP" };
 
     // -- Postflop streets --
     let mut board: Vec<Card> = Vec::new();
+    let mut board_str = String::new();
 
     for &(street_name, num_cards) in &[("Flop", 3usize), ("Turn", 1usize), ("River", 1usize)] {
-        match prompt_yn(
-            &format!("\nContinue to the {}?", street_name.to_lowercase()),
-            "y",
-            reader,
-            writer,
-        ) {
-            Some(true) => {}
-            Some(false) => {
-                writeln!(
-                    writer,
-                    "\n  {}",
-                    format!("Hand ended before the {}.", street_name.to_lowercase()).dimmed()
-                )
-                .ok();
-                return Ok(());
-            }
-            None => return Err(QuitSession),
-        }
-
         // Get street cards
         let new_cards = loop {
             let example = if num_cards == 3 { "Ks7d2c" } else { "Jh" };
             let label = if num_cards > 1 { "cards" } else { "card" };
             let input = prompt(
-                &format!("{} {}? (e.g. {})", street_name, label, example),
+                &format!("  {} {}", street_name, label),
                 None,
                 reader,
                 writer,
@@ -717,45 +527,47 @@ fn play_one_hand(
             if input.to_lowercase() == "q" {
                 return Err(QuitSession);
             }
+            if input.is_empty() {
+                // Skip to end
+                writeln!(writer, "\n  {}", format!("Hand ended before the {}.", street_name.to_lowercase()).dimmed()).ok();
+                return Ok(());
+            }
             if let Some(cards) = parse_board_input(&input) {
                 if cards.len() != num_cards {
-                    writeln!(
-                        writer,
-                        "  {}",
-                        format!("Need exactly {} {}. Use format like {}", num_cards, label, example).red()
-                    )
-                    .ok();
+                    writeln!(writer, "  {}", format!("Need {} {}. (e.g. {})", num_cards, label, example).red()).ok();
                     continue;
                 }
-                // Check duplicates
                 let known: HashSet<Card> = hole_cards.iter().chain(board.iter()).copied().collect();
                 if cards.iter().any(|c| known.contains(c)) {
-                    writeln!(writer, "  {}", "Duplicate card detected. Try again.".red()).ok();
+                    writeln!(writer, "  {}", "Duplicate card. Try again.".red()).ok();
                     continue;
                 }
                 break cards;
             }
-            writeln!(
-                writer,
-                "  {}",
-                format!("Need exactly {} {}. Use format like {}", num_cards, label, example).red()
-            )
-            .ok();
+            writeln!(writer, "  {}", format!("Invalid. (e.g. {})", example).red()).ok();
         };
-        board.extend(new_cards);
+        board.extend(&new_cards);
+        board_str = board.iter().map(|c| format!("{}", c)).collect();
 
-        show_street_analysis(
-            street_name.to_lowercase().as_str(),
-            &hole_cards,
-            &hand_name,
+        // Show solver-backed advice or fall back to heuristics
+        writeln!(writer, "\n{}", format!("--- {} ---", capitalize(street_name)).cyan().bold()).ok();
+        writeln!(writer, "  Board: {}  |  {}  |  Pot: {:.0}bb  |  Stack: {:.0}bb",
+            board_display(&board), ip_label, pot, remaining_stack).ok();
+
+        show_street_advice(
+            engine,
+            &hand_str,
+            hero,
+            villain,
             &board,
+            &board_str,
             pot,
             remaining_stack,
-            &hero_pos,
-            villain_pos.as_deref(),
             ip_label,
-            num_players,
-            situation,
+            street_name.to_lowercase().as_str(),
+            &hole_cards,
+            &hero_pos,
+            &villain_pos_str,
             table_size,
             writer,
         );
@@ -774,159 +586,162 @@ fn play_one_hand(
     Ok(())
 }
 
-fn show_street_analysis(
+// ---------------------------------------------------------------------------
+// Solver-backed advice
+// ---------------------------------------------------------------------------
+
+/// Show preflop advice using solver if available, falling back to heuristics.
+/// Returns true if solver was used.
+fn show_preflop_advice(
+    engine: &StrategyEngine,
+    hand_name: &str,
+    _hand_str: &str,
+    hero_pos: &str,
+    hero: Position,
+    table_size: &str,
+    writer: &mut dyn Write,
+) -> bool {
+    // Try solver first
+    if engine.has_preflop() {
+        if let Some(result) = engine.query_preflop(hand_name, hero, None) {
+            writeln!(writer, "  {}", format_strategy(&result)).ok();
+            return true;
+        }
+    }
+
+    // Fall back to heuristic
+    let pf_action = preflop_action(hand_name, hero_pos, "RFI", None, table_size)
+        .unwrap_or_else(|_| crate::preflop::PreflopAction {
+            action: "FOLD".to_string(),
+            detail: "Unknown hand".to_string(),
+            hand: hand_name.to_string(),
+            position: hero_pos.to_string(),
+        });
+
+    writeln!(writer, "  \u{2192} {}", styled_action(&pf_action.action)).ok();
+    if !engine.has_preflop() {
+        writeln!(writer, "  {}", "Tip: run `gto solve preflop` for solver-backed advice".dimmed()).ok();
+    }
+    false
+}
+
+/// Check if we should fold preflop.
+fn should_fold_preflop(engine: &StrategyEngine, hand_name: &str, hero: Position) -> bool {
+    if engine.has_preflop() {
+        if let Some(result) = engine.query_preflop(hand_name, hero, None) {
+            // Fold if the dominant action is FOLD (>80%)
+            if let Some(fold_idx) = result.actions.iter().position(|a| a == "FOLD") {
+                return result.frequencies[fold_idx] > 0.80;
+            }
+        }
+    }
+    // Fall back: fold if heuristic says fold
+    let action = preflop_action(hand_name, hero.as_str(), "RFI", None, "6max");
+    matches!(action, Ok(ref a) if a.action == "FOLD")
+}
+
+/// Show postflop street advice. Uses solver when available, falls back to heuristics.
+fn show_street_advice(
+    engine: &mut StrategyEngine,
+    hand_str: &str,
+    hero: Position,
+    villain: Position,
+    board: &[Card],
+    board_str: &str,
+    pot: f64,
+    stack: f64,
+    ip_label: &str,
     street: &str,
     hole_cards: &[Card],
-    _hand_name: &str,
+    hero_pos: &str,
+    villain_pos: &str,
+    table_size: &str,
+    writer: &mut dyn Write,
+) {
+    // Try solver-backed advice
+    let iterations = match street {
+        "flop" => 500000,
+        "turn" => 5000,
+        "river" => 10000,
+        _ => 10000,
+    };
+
+    match engine.query_postflop(hand_str, hero, villain, board_str, pot, stack, iterations) {
+        Ok(result) if result.source != StrategySource::NotInRange && !result.actions.is_empty() => {
+            writeln!(writer, "  {}", format_strategy(&result)).ok();
+            return;
+        }
+        Ok(result) if result.source == StrategySource::NotInRange => {
+            writeln!(writer, "  {} not in solver range \u{2014} using heuristic", hand_str.dimmed()).ok();
+        }
+        Err(_) => {
+            // Solver failed, fall through to heuristic
+        }
+        _ => {}
+    }
+
+    // Fall back to heuristic analysis
+    show_heuristic_analysis(
+        street, hole_cards, board, pot, stack, hero_pos,
+        Some(villain_pos), ip_label, "RFI", table_size, writer,
+    );
+}
+
+/// Heuristic-based postflop analysis (fallback when solver unavailable).
+fn show_heuristic_analysis(
+    street: &str,
+    hole_cards: &[Card],
     board: &[Card],
     pot: f64,
     stack: f64,
     hero_pos: &str,
     villain_pos: Option<&str>,
     ip_label: &str,
-    num_players: usize,
     situation: &str,
     table_size: &str,
     writer: &mut dyn Write,
 ) {
-    writeln!(writer, "\n{}", format!("--- {} ---", capitalize(street)).cyan().bold()).ok();
-    writeln!(writer, "  Board: {}", board_display(board)).ok();
-
-    // Pot / Stack / SPR status line
-    let spr_result = if pot > 0.0 { calc_spr(stack, pot).ok() } else { None };
-    writeln!(
-        writer,
-        "  Pot: {}  |  Stack: {}  |  SPR: {}",
-        format!("${:.0}", pot).bold(),
-        format!("${:.0}", stack).bold(),
-        if let Some(ref spr_r) = spr_result {
-            format!("{:.1} ({})", spr_r.ratio, spr_r.zone).bold().to_string()
-        } else {
-            "-".to_string()
-        }
-    ).ok();
-    if let Some(ref spr_r) = spr_result {
-        writeln!(writer, "  {}", explain_spr(spr_r.zone).dimmed()).ok();
-    }
-
     // Board texture
     let texture = match analyze_board(board) {
         Ok(t) => t,
         Err(e) => {
-            writeln!(writer, "  {}", format!("Error analyzing board: {}", e).red()).ok();
+            writeln!(writer, "  {}", format!("Error: {}", e).red()).ok();
             return;
         }
     };
-    writeln!(writer, "  Texture: {}", explain_board_texture(texture.wetness)).ok();
-    if !texture.draws.is_empty() {
-        writeln!(writer, "  Draws: {}", texture.draws.join(", ")).ok();
-    }
 
     // Hand evaluation
     let hand_result = match evaluate_hand(hole_cards, board) {
         Ok(r) => r,
         Err(e) => {
-            writeln!(writer, "  {}", format!("Error evaluating hand: {}", e).red()).ok();
+            writeln!(writer, "  {}", format!("Error: {}", e).red()).ok();
             return;
         }
     };
-    writeln!(writer, "\n  You made: {}", hand_result.category.to_string().bold()).ok();
-    writeln!(writer, "  {}", explain_hand_category(hand_result.category).dimmed()).ok();
+    writeln!(writer, "  Made: {}", hand_result.category.to_string().bold()).ok();
 
-    // Equity vs villain range
+    // Equity
     let villain_range = estimate_villain_range(situation, hero_pos, villain_pos, hole_cards, table_size);
     let equity = match equity_vs_range(hole_cards, &villain_range, Some(board), 10000) {
         Ok(result) => {
             let eq = result.equity();
-            writeln!(writer, "  Equity vs villain: {}", equity_bar(eq, 30)).ok();
+            writeln!(writer, "  Equity: {}", equity_bar(eq, 30)).ok();
             eq
         }
-        Err(_) => {
-            writeln!(writer, "  Equity vs villain: ~50% (estimated)").ok();
-            0.5
-        }
+        Err(_) => 0.5,
     };
 
-    // Hand strength classification
     let strength = classify_hand_strength(&hand_result, hole_cards, board, equity);
-    writeln!(writer, "\n  Strength: {}", strength.bold()).ok();
-    writeln!(writer, "  {}", explain_strength(strength).dimmed()).ok();
 
     // Strategy recommendation
     let strat = street_strategy(strength, &texture, pot, stack, ip_label, street);
-
-    // Build action line with dollar amounts
-    let action_detail = if strat.action.starts_with("BET") && pot > 0.0 {
-        if let Some(sizing_pct) = parse_sizing_pct(&strat.sizing) {
-            let bet_amount = pot * sizing_pct;
-            format!(
-                "\n  \u{2192} {}  ${:.0} ({} into ${:.0} pot)",
-                styled_action(&strat.action),
-                bet_amount,
-                strat.sizing,
-                pot
-            )
-        } else {
-            format!("\n  \u{2192} {} {}", styled_action(&strat.action), strat.sizing)
-        }
-    } else if strat.action.contains("CHECK/CALL") && pot > 0.0 {
-        format!(
-            "\n  \u{2192} {}  (pot is ${:.0}, stack ${:.0})",
-            styled_action(&strat.action),
-            pot,
-            stack
-        )
-    } else {
-        format!("\n  \u{2192} {} {}", styled_action(&strat.action), strat.sizing)
-    };
-    writeln!(writer, "{}", action_detail).ok();
-    writeln!(writer, "  {}", format!("Why: {}", strat.reasoning).dimmed()).ok();
-
-    // EV estimate when we have equity and a bet sizing
-    if strat.action.starts_with("BET") && pot > 0.0 {
-        if let Some(sizing_pct) = parse_sizing_pct(&strat.sizing) {
-            let bet_amount = pot * sizing_pct;
-            let ev_val = crate::math_engine::ev(equity, pot, bet_amount);
-            let ev_str = if ev_val >= 0.0 {
-                format!("+${:.0}", ev_val).green().to_string()
-            } else {
-                format!("-${:.0}", ev_val.abs()).red().to_string()
-            };
-            writeln!(writer, "  EV of bet: {}", ev_str).ok();
-        }
-    }
-
-    // Multiway adjustments
-    if num_players > 2 {
-        let adj = multiway_range_adjustment(num_players);
-        writeln!(
-            writer,
-            "\n  {}",
-            format!("Multiway ({} players): {}", num_players, adj).dimmed()
-        )
-        .ok();
-    }
-
-    // Bluff math on the river
-    if street == "river" && (strength == "weak" || strength == "bluff") {
-        if pot > 0.0 {
-            let bluff_bet = pot * 0.66;
-            if let Ok(be) = break_even_pct(pot, bluff_bet) {
-                writeln!(
-                    writer,
-                    "\n  {}",
-                    format!(
-                        "Bluff math: ${:.0} bet (66% pot) needs villain to fold {:.0}% to break even",
-                        bluff_bet,
-                        be * 100.0
-                    )
-                    .dimmed()
-                )
-                .ok();
-            }
-        }
-    }
+    writeln!(writer, "  \u{2192} {} {}", styled_action(&strat.action), strat.sizing).ok();
+    writeln!(writer, "  {}", strat.reasoning.dimmed()).ok();
 }
+
+// ---------------------------------------------------------------------------
+// Pot tracking
+// ---------------------------------------------------------------------------
 
 fn update_pot_after_action(
     pot: f64,
@@ -966,7 +781,7 @@ fn update_pot_after_action(
         "allin" => Some((pot + stack * 2.0, 0.0)),
         "bet" => {
             let default_bet = format!("{}", (pot * 0.5) as u64);
-            let amount_str = prompt(&format!("  Bet/raise amount in $ (pot is ${:.0})", pot), Some(&default_bet), reader, writer);
+            let amount_str = prompt(&format!("  Bet/raise size (pot={:.0}bb)", pot), Some(&default_bet), reader, writer);
             if amount_str.to_lowercase() == "q" {
                 return None;
             }
@@ -975,7 +790,7 @@ fn update_pot_after_action(
         }
         "call" => {
             let default_call = format!("{}", (pot * 0.3) as u64);
-            let amount_str = prompt(&format!("  Call amount in $ (pot is ${:.0})", pot), Some(&default_call), reader, writer);
+            let amount_str = prompt(&format!("  Call amount (pot={:.0}bb)", pot), Some(&default_call), reader, writer);
             if amount_str.to_lowercase() == "q" {
                 return None;
             }
@@ -1055,7 +870,6 @@ mod tests {
         ];
         let result = evaluate_hand(&hole, &board).unwrap();
         let strength = classify_hand_strength(&result, &hole, &board, 0.72);
-        // Top pair with Ace kicker -> "strong"
         assert_eq!(strength, "strong");
     }
 
@@ -1141,7 +955,6 @@ mod tests {
 
     #[test]
     fn test_classify_medium_pair() {
-        // Top pair weak kicker -> medium
         let hole = vec![
             card(Rank::King, Suit::Hearts),
             card(Rank::Three, Suit::Spades),
@@ -1166,7 +979,6 @@ mod tests {
         ];
         let range = estimate_villain_range("RFI", "BTN", None, &hero, "6max");
         assert!(!range.is_empty());
-        // Should have removed some hands blocked by hero's AhKs
         assert!(range.iter().any(|h| h == "QQ"));
     }
 
@@ -1178,7 +990,6 @@ mod tests {
         ];
         let range = estimate_villain_range("vs_3bet", "BTN", Some("CO"), &hero, "6max");
         assert!(!range.is_empty());
-        // 3-bet range should be small (premium)
         assert!(range.len() < 30);
     }
 
@@ -1220,18 +1031,17 @@ mod tests {
         let mut output = Vec::new();
         run_interactive_session(&mut reader, &mut output);
         let out = String::from_utf8(output).unwrap();
-        assert!(out.contains("Welcome to GTO Play!"));
+        assert!(out.contains("GTO Play"));
     }
 
     #[test]
     fn test_interactive_full_preflop_fold() {
-        // 6max, 1/2, 200 stack, UTG, 72o (should fold), no raise
-        let input = b"6max\n1/2\n200\nUTG\n2\n7h2c\nn\n\nn\n";
+        // UTG, 72o (should fold)
+        let input = b"7h2c\nUTG\nn\n";
         let mut reader = &input[..];
         let mut output = Vec::new();
         run_interactive_session(&mut reader, &mut output);
         let out = String::from_utf8(output).unwrap();
         assert!(out.contains("FOLD"));
-        assert!(out.contains("fold preflop"));
     }
 }

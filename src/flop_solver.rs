@@ -445,101 +445,182 @@ pub fn solve_flop(config: &FlopSolverConfig) -> FlopSolution {
             Player::IP => ip_combos.len(),
         };
 
-        for h in 0..num_combos {
-            // Skip if hand blocks the sampled cards
-            let blocked = match traverser {
-                Player::OOP => {
-                    oop_blockers[h][turn_card as usize]
-                        || oop_blockers[h][river_card as usize]
-                }
-                Player::IP => {
-                    ip_blockers[h][turn_card as usize]
-                        || ip_blockers[h][river_card as usize]
-                }
-            };
-            if blocked {
-                continue;
+        // Sequential path for small ranges (< 20 combos)
+        if num_combos < 20 {
+            for h in 0..num_combos {
+                let blocked = match traverser {
+                    Player::OOP => {
+                        oop_blockers[h][turn_card as usize]
+                            || oop_blockers[h][river_card as usize]
+                    }
+                    Player::IP => {
+                        ip_blockers[h][turn_card as usize]
+                            || ip_blockers[h][river_card as usize]
+                    }
+                };
+                if blocked { continue; }
+
+                let opp_reach = match traverser {
+                    Player::OOP => {
+                        let valid = &valid_ip_for_oop[h];
+                        let mut reach = vec![0.0f64; ip_combos.len()];
+                        for &j in valid {
+                            let j = j as usize;
+                            if !ip_blockers[j][turn_card as usize]
+                                && !ip_blockers[j][river_card as usize]
+                            {
+                                reach[j] = 1.0;
+                            }
+                        }
+                        reach
+                    }
+                    Player::IP => {
+                        let valid = &valid_oop_for_ip[h];
+                        let mut reach = vec![0.0f64; oop_combos.len()];
+                        for &i in valid {
+                            let i = i as usize;
+                            if !oop_blockers[i][turn_card as usize]
+                                && !oop_blockers[i][river_card as usize]
+                            {
+                                reach[i] = 1.0;
+                            }
+                        }
+                        reach
+                    }
+                };
+
+                let flop_bucket = match traverser {
+                    Player::OOP => flop_oop_buckets[h] as usize,
+                    Player::IP => flop_ip_buckets[h] as usize,
+                };
+                let turn_bucket = match traverser {
+                    Player::OOP => turn_oop_buckets[h] as usize,
+                    Player::IP => turn_ip_buckets[h] as usize,
+                };
+                let river_bucket = match traverser {
+                    Player::OOP => river_oop_buckets[h] as usize,
+                    Player::IP => river_ip_buckets[h] as usize,
+                };
+
+                cfr_traverse_flop(
+                    &flop_tree, traverser, h, flop_bucket, turn_bucket, river_bucket,
+                    &opp_reach, &oop_combos, &ip_combos,
+                    &oop_blockers, &ip_blockers,
+                    &flop_oop_buckets, &flop_ip_buckets,
+                    turn_oop_buckets, turn_ip_buckets,
+                    river_oop_buckets, river_ip_buckets,
+                    oop_scores, ip_scores,
+                    &valid_ip_for_oop, &valid_oop_for_ip,
+                    config.starting_pot, &turn_template, &river_template,
+                    &mut flop_oop_cfr, &mut flop_ip_cfr,
+                    &mut turn_oop_cfr, &mut turn_ip_cfr,
+                    &mut river_oop_cfr, &mut river_ip_cfr,
+                    &mut strategy_buf, &mut action_values,
+                    iter,
+                );
             }
+            continue;
+        }
 
-            // Initialize opponent reach
-            let opp_reach = match traverser {
-                Player::OOP => {
-                    let valid = &valid_ip_for_oop[h];
-                    let mut reach = vec![0.0f64; ip_combos.len()];
-                    for &j in valid {
-                        let j = j as usize;
-                        if !ip_blockers[j][turn_card as usize]
-                            && !ip_blockers[j][river_card as usize]
-                        {
-                            reach[j] = 1.0;
-                        }
+        // Parallel path for large ranges (>= 20 combos)
+        // Snapshot CFR instances for parallel readonly traversal
+        let snap_flop_oop = flop_oop_cfr.clone();
+        let snap_flop_ip = flop_ip_cfr.clone();
+        let snap_turn_oop = turn_oop_cfr.clone();
+        let snap_turn_ip = turn_ip_cfr.clone();
+        let snap_river_oop = river_oop_cfr.clone();
+        let snap_river_ip = river_ip_cfr.clone();
+
+        let all_updates: Vec<Vec<RegretUpdate>> = (0..num_combos)
+            .into_par_iter()
+            .filter_map(|h| {
+                let blocked = match traverser {
+                    Player::OOP => {
+                        oop_blockers[h][turn_card as usize]
+                            || oop_blockers[h][river_card as usize]
                     }
-                    reach
-                }
-                Player::IP => {
-                    let valid = &valid_oop_for_ip[h];
-                    let mut reach = vec![0.0f64; oop_combos.len()];
-                    for &i in valid {
-                        let i = i as usize;
-                        if !oop_blockers[i][turn_card as usize]
-                            && !oop_blockers[i][river_card as usize]
-                        {
-                            reach[i] = 1.0;
-                        }
+                    Player::IP => {
+                        ip_blockers[h][turn_card as usize]
+                            || ip_blockers[h][river_card as usize]
                     }
-                    reach
-                }
-            };
+                };
+                if blocked { return None; }
 
-            // Get bucket indices for this combo
-            let flop_bucket = match traverser {
-                Player::OOP => flop_oop_buckets[h] as usize,
-                Player::IP => flop_ip_buckets[h] as usize,
-            };
-            let turn_bucket = match traverser {
-                Player::OOP => turn_oop_buckets[h] as usize,
-                Player::IP => turn_ip_buckets[h] as usize,
-            };
-            let river_bucket = match traverser {
-                Player::OOP => river_oop_buckets[h] as usize,
-                Player::IP => river_ip_buckets[h] as usize,
-            };
+                let opp_reach = match traverser {
+                    Player::OOP => {
+                        let valid = &valid_ip_for_oop[h];
+                        let mut reach = vec![0.0f64; ip_combos.len()];
+                        for &j in valid {
+                            let j = j as usize;
+                            if !ip_blockers[j][turn_card as usize]
+                                && !ip_blockers[j][river_card as usize]
+                            {
+                                reach[j] = 1.0;
+                            }
+                        }
+                        reach
+                    }
+                    Player::IP => {
+                        let valid = &valid_oop_for_ip[h];
+                        let mut reach = vec![0.0f64; oop_combos.len()];
+                        for &i in valid {
+                            let i = i as usize;
+                            if !oop_blockers[i][turn_card as usize]
+                                && !oop_blockers[i][river_card as usize]
+                            {
+                                reach[i] = 1.0;
+                            }
+                        }
+                        reach
+                    }
+                };
 
-            cfr_traverse_flop(
-                &flop_tree,
-                traverser,
-                h,
-                flop_bucket,
-                turn_bucket,
-                river_bucket,
-                &opp_reach,
-                &oop_combos,
-                &ip_combos,
-                &oop_blockers,
-                &ip_blockers,
-                &flop_oop_buckets,
-                &flop_ip_buckets,
-                turn_oop_buckets,
-                turn_ip_buckets,
-                river_oop_buckets,
-                river_ip_buckets,
-                oop_scores,
-                ip_scores,
-                &valid_ip_for_oop,
-                &valid_oop_for_ip,
-                config.starting_pot,
-                &turn_template,
-                &river_template,
-                &mut flop_oop_cfr,
-                &mut flop_ip_cfr,
-                &mut turn_oop_cfr,
-                &mut turn_ip_cfr,
-                &mut river_oop_cfr,
-                &mut river_ip_cfr,
-                &mut strategy_buf,
-                &mut action_values,
-                iter,
-            );
+                let flop_bucket = match traverser {
+                    Player::OOP => flop_oop_buckets[h] as usize,
+                    Player::IP => flop_ip_buckets[h] as usize,
+                };
+                let turn_bucket = match traverser {
+                    Player::OOP => turn_oop_buckets[h] as usize,
+                    Player::IP => turn_ip_buckets[h] as usize,
+                };
+                let river_bucket = match traverser {
+                    Player::OOP => river_oop_buckets[h] as usize,
+                    Player::IP => river_ip_buckets[h] as usize,
+                };
+
+                let mut updates = Vec::new();
+                cfr_traverse_flop_ro(
+                    &flop_tree, traverser, h, flop_bucket, turn_bucket, river_bucket,
+                    &opp_reach, &oop_combos, &ip_combos,
+                    &oop_blockers, &ip_blockers,
+                    &flop_oop_buckets, &flop_ip_buckets,
+                    turn_oop_buckets, turn_ip_buckets,
+                    river_oop_buckets, river_ip_buckets,
+                    oop_scores, ip_scores,
+                    &valid_ip_for_oop, &valid_oop_for_ip,
+                    config.starting_pot, &turn_template, &river_template,
+                    &snap_flop_oop, &snap_flop_ip,
+                    &snap_turn_oop, &snap_turn_ip,
+                    &snap_river_oop, &snap_river_ip,
+                    &mut updates, iter,
+                );
+                Some(updates)
+            })
+            .collect();
+
+        for hand_updates in all_updates {
+            for upd in hand_updates {
+                let cfr = match (traverser, upd.street) {
+                    (Player::OOP, 0) => &mut flop_oop_cfr,
+                    (Player::IP, 0) => &mut flop_ip_cfr,
+                    (Player::OOP, 1) => &mut turn_oop_cfr,
+                    (Player::IP, 1) => &mut turn_ip_cfr,
+                    (Player::OOP, 2) => &mut river_oop_cfr,
+                    (Player::IP, 2) => &mut river_ip_cfr,
+                    _ => unreachable!(),
+                };
+                cfr.update(upd.node_id, upd.bucket, &upd.action_values, upd.node_value, upd.reach_prob);
+            }
         }
     }
 
@@ -1283,6 +1364,395 @@ fn cfr_traverse_river_template(
         TreeNode::Chance { .. } => {
             unreachable!("River template should not contain chance nodes")
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parallel traversal: readonly + collected updates
+// ---------------------------------------------------------------------------
+
+/// A collected regret update for deferred application after parallel traversal.
+struct RegretUpdate {
+    /// 0 = flop, 1 = turn, 2 = river
+    street: u8,
+    node_id: usize,
+    bucket: usize,
+    action_values: Vec<f32>,
+    node_value: f32,
+    reach_prob: f32,
+}
+
+/// Readonly flop traversal that collects RegretUpdates instead of mutating CFR.
+#[allow(clippy::too_many_arguments)]
+fn cfr_traverse_flop_ro(
+    node: &TreeNode, traverser: Player, hand_idx: usize,
+    flop_bucket: usize, turn_bucket: usize, river_bucket: usize,
+    opp_reach: &[f64], oop_combos: &[Combo], ip_combos: &[Combo],
+    oop_blockers: &[[bool; 52]], ip_blockers: &[[bool; 52]],
+    flop_oop_buckets: &[u16], flop_ip_buckets: &[u16],
+    turn_oop_buckets: &[u16], turn_ip_buckets: &[u16],
+    river_oop_buckets: &[u16], river_ip_buckets: &[u16],
+    oop_scores: &[u32], ip_scores: &[u32],
+    valid_ip_for_oop: &[Vec<u16>], valid_oop_for_ip: &[Vec<u16>],
+    flop_pot: f64, turn_template: &TreeNode, river_template: &TreeNode,
+    flop_oop_cfr: &FlatCfr, flop_ip_cfr: &FlatCfr,
+    turn_oop_cfr: &FlatCfr, turn_ip_cfr: &FlatCfr,
+    river_oop_cfr: &FlatCfr, river_ip_cfr: &FlatCfr,
+    updates: &mut Vec<RegretUpdate>, iter: usize,
+) -> f64 {
+    match node {
+        TreeNode::Terminal { terminal_type, pot, invested, .. } => {
+            let opp_reach_sum: f64 = opp_reach.iter().sum();
+            if opp_reach_sum < 1e-10 { return 0.0; }
+            let my_invested = invested[traverser.index()];
+            match terminal_type {
+                TerminalType::Fold { folder } => {
+                    if *folder == traverser { -my_invested * opp_reach_sum }
+                    else { (*pot - my_invested) * opp_reach_sum }
+                }
+                TerminalType::Showdown => {
+                    let turn_scale = *pot;
+                    let turn_value = cfr_traverse_turn_template_ro(
+                        turn_template, traverser, hand_idx, turn_bucket, river_bucket,
+                        opp_reach, oop_combos, ip_combos,
+                        turn_oop_buckets, turn_ip_buckets,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        turn_scale, river_template,
+                        turn_oop_cfr, turn_ip_cfr, river_oop_cfr, river_ip_cfr,
+                        updates, iter,
+                    );
+                    turn_value - my_invested * opp_reach_sum
+                }
+            }
+        }
+        TreeNode::Action { node_id, player, children, actions, .. } => {
+            let num_actions = actions.len();
+            let nid = *node_id as usize;
+            if *player == traverser {
+                let cfr = match traverser {
+                    Player::OOP => flop_oop_cfr,
+                    Player::IP => flop_ip_cfr,
+                };
+                let mut strategy = vec![0.0f32; num_actions];
+                cfr.current_strategy(nid, flop_bucket, &mut strategy);
+                let mut node_value = 0.0f64;
+                let mut action_vals = vec![0.0f32; num_actions];
+                for a in 0..num_actions {
+                    if strategy[a] < 0.001 && iter > 1000 && iter % 1000 != 0 { continue; }
+                    let av = cfr_traverse_flop_ro(
+                        &children[a], traverser, hand_idx,
+                        flop_bucket, turn_bucket, river_bucket,
+                        opp_reach, oop_combos, ip_combos,
+                        oop_blockers, ip_blockers,
+                        flop_oop_buckets, flop_ip_buckets,
+                        turn_oop_buckets, turn_ip_buckets,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores,
+                        valid_ip_for_oop, valid_oop_for_ip,
+                        flop_pot, turn_template, river_template,
+                        flop_oop_cfr, flop_ip_cfr,
+                        turn_oop_cfr, turn_ip_cfr,
+                        river_oop_cfr, river_ip_cfr,
+                        updates, iter,
+                    );
+                    action_vals[a] = av as f32;
+                    node_value += strategy[a] as f64 * av;
+                }
+                let reach_sum: f64 = opp_reach.iter().sum();
+                let reach_prob = if reach_sum > 0.0 { 1.0f32 } else { 0.0f32 };
+                updates.push(RegretUpdate {
+                    street: 0, node_id: nid, bucket: flop_bucket,
+                    action_values: action_vals, node_value: node_value as f32, reach_prob,
+                });
+                node_value
+            } else {
+                let num_opp = opp_reach.len();
+                let opp_cfr = match traverser {
+                    Player::OOP => flop_ip_cfr,
+                    Player::IP => flop_oop_cfr,
+                };
+                let opp_buckets = match traverser {
+                    Player::OOP => flop_ip_buckets,
+                    Player::IP => flop_oop_buckets,
+                };
+                let opp_num_actions = opp_cfr.node_num_actions(nid) as usize;
+                let mut opp_strats = vec![0.0f32; num_opp * opp_num_actions];
+                for j in 0..num_opp {
+                    if opp_reach[j] > 0.0 {
+                        let bucket = opp_buckets[j] as usize;
+                        opp_cfr.current_strategy(nid, bucket, &mut opp_strats[j * opp_num_actions..(j + 1) * opp_num_actions]);
+                    }
+                }
+                let mut node_value = 0.0f64;
+                for a in 0..num_actions {
+                    let mut new_opp_reach = vec![0.0f64; num_opp];
+                    for j in 0..num_opp {
+                        if opp_reach[j] > 0.0 {
+                            new_opp_reach[j] = opp_reach[j] * opp_strats[j * opp_num_actions + a] as f64;
+                        }
+                    }
+                    node_value += cfr_traverse_flop_ro(
+                        &children[a], traverser, hand_idx,
+                        flop_bucket, turn_bucket, river_bucket,
+                        &new_opp_reach, oop_combos, ip_combos,
+                        oop_blockers, ip_blockers,
+                        flop_oop_buckets, flop_ip_buckets,
+                        turn_oop_buckets, turn_ip_buckets,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores,
+                        valid_ip_for_oop, valid_oop_for_ip,
+                        flop_pot, turn_template, river_template,
+                        flop_oop_cfr, flop_ip_cfr,
+                        turn_oop_cfr, turn_ip_cfr,
+                        river_oop_cfr, river_ip_cfr,
+                        updates, iter,
+                    );
+                }
+                node_value
+            }
+        }
+        TreeNode::Chance { .. } => unreachable!("Flop tree should not contain chance nodes"),
+    }
+}
+
+/// Readonly turn template traversal.
+#[allow(clippy::too_many_arguments)]
+fn cfr_traverse_turn_template_ro(
+    node: &TreeNode, traverser: Player, hand_idx: usize,
+    turn_bucket: usize, river_bucket: usize,
+    opp_reach: &[f64], oop_combos: &[Combo], ip_combos: &[Combo],
+    turn_oop_buckets: &[u16], turn_ip_buckets: &[u16],
+    river_oop_buckets: &[u16], river_ip_buckets: &[u16],
+    oop_scores: &[u32], ip_scores: &[u32],
+    valid_ip_for_oop: &[Vec<u16>], valid_oop_for_ip: &[Vec<u16>],
+    scale: f64, river_template: &TreeNode,
+    turn_oop_cfr: &FlatCfr, turn_ip_cfr: &FlatCfr,
+    river_oop_cfr: &FlatCfr, river_ip_cfr: &FlatCfr,
+    updates: &mut Vec<RegretUpdate>, iter: usize,
+) -> f64 {
+    match node {
+        TreeNode::Terminal { terminal_type, pot, invested, .. } => {
+            let opp_reach_sum: f64 = opp_reach.iter().sum();
+            if opp_reach_sum < 1e-10 { return 0.0; }
+            match terminal_type {
+                TerminalType::Fold { folder } => {
+                    let my_invested = invested[traverser.index()] * scale;
+                    if *folder == traverser { -my_invested * opp_reach_sum }
+                    else { (*pot * scale - my_invested) * opp_reach_sum }
+                }
+                TerminalType::Showdown => {
+                    let river_scale = *pot * scale;
+                    cfr_traverse_river_template_ro(
+                        river_template, traverser, hand_idx, river_bucket,
+                        opp_reach, oop_combos, ip_combos,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        river_scale, river_oop_cfr, river_ip_cfr, updates, iter,
+                    )
+                }
+            }
+        }
+        TreeNode::Action { node_id, player, children, actions, .. } => {
+            let num_actions = actions.len();
+            let nid = *node_id as usize;
+            if *player == traverser {
+                let cfr = match traverser {
+                    Player::OOP => turn_oop_cfr,
+                    Player::IP => turn_ip_cfr,
+                };
+                let mut strategy = vec![0.0f32; num_actions];
+                cfr.current_strategy(nid, turn_bucket, &mut strategy);
+                let mut node_value = 0.0f64;
+                let mut action_vals = vec![0.0f32; num_actions];
+                for a in 0..num_actions {
+                    if strategy[a] < 0.001 && iter > 1000 && iter % 1000 != 0 { continue; }
+                    let av = cfr_traverse_turn_template_ro(
+                        &children[a], traverser, hand_idx, turn_bucket, river_bucket,
+                        opp_reach, oop_combos, ip_combos,
+                        turn_oop_buckets, turn_ip_buckets,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        scale, river_template,
+                        turn_oop_cfr, turn_ip_cfr, river_oop_cfr, river_ip_cfr,
+                        updates, iter,
+                    );
+                    action_vals[a] = av as f32;
+                    node_value += strategy[a] as f64 * av;
+                }
+                let reach_sum: f64 = opp_reach.iter().sum();
+                let reach_prob = if reach_sum > 0.0 { 1.0f32 } else { 0.0f32 };
+                updates.push(RegretUpdate {
+                    street: 1, node_id: nid, bucket: turn_bucket,
+                    action_values: action_vals, node_value: node_value as f32, reach_prob,
+                });
+                node_value
+            } else {
+                let num_opp = opp_reach.len();
+                let opp_cfr = match traverser {
+                    Player::OOP => turn_ip_cfr,
+                    Player::IP => turn_oop_cfr,
+                };
+                let opp_buckets = match traverser {
+                    Player::OOP => turn_ip_buckets,
+                    Player::IP => turn_oop_buckets,
+                };
+                let opp_num_actions = opp_cfr.node_num_actions(nid) as usize;
+                let mut opp_strats = vec![0.0f32; num_opp * opp_num_actions];
+                for j in 0..num_opp {
+                    if opp_reach[j] > 0.0 {
+                        let bucket = opp_buckets[j] as usize;
+                        opp_cfr.current_strategy(nid, bucket, &mut opp_strats[j * opp_num_actions..(j + 1) * opp_num_actions]);
+                    }
+                }
+                let mut node_value = 0.0f64;
+                for a in 0..num_actions {
+                    let mut new_opp_reach = vec![0.0f64; num_opp];
+                    for j in 0..num_opp {
+                        if opp_reach[j] > 0.0 {
+                            new_opp_reach[j] = opp_reach[j] * opp_strats[j * opp_num_actions + a] as f64;
+                        }
+                    }
+                    node_value += cfr_traverse_turn_template_ro(
+                        &children[a], traverser, hand_idx, turn_bucket, river_bucket,
+                        &new_opp_reach, oop_combos, ip_combos,
+                        turn_oop_buckets, turn_ip_buckets,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        scale, river_template,
+                        turn_oop_cfr, turn_ip_cfr, river_oop_cfr, river_ip_cfr,
+                        updates, iter,
+                    );
+                }
+                node_value
+            }
+        }
+        TreeNode::Chance { .. } => unreachable!("Turn template should not contain chance nodes"),
+    }
+}
+
+/// Readonly river template traversal.
+#[allow(clippy::too_many_arguments)]
+fn cfr_traverse_river_template_ro(
+    node: &TreeNode, traverser: Player, hand_idx: usize,
+    river_bucket: usize, opp_reach: &[f64],
+    oop_combos: &[Combo], ip_combos: &[Combo],
+    river_oop_buckets: &[u16], river_ip_buckets: &[u16],
+    oop_scores: &[u32], ip_scores: &[u32],
+    valid_ip_for_oop: &[Vec<u16>], valid_oop_for_ip: &[Vec<u16>],
+    scale: f64, river_oop_cfr: &FlatCfr, river_ip_cfr: &FlatCfr,
+    updates: &mut Vec<RegretUpdate>, iter: usize,
+) -> f64 {
+    match node {
+        TreeNode::Terminal { terminal_type, pot, invested, .. } => {
+            let opp_reach_sum: f64 = opp_reach.iter().sum();
+            if opp_reach_sum < 1e-10 { return 0.0; }
+            match terminal_type {
+                TerminalType::Fold { folder } => {
+                    let my_invested = invested[traverser.index()] * scale;
+                    if *folder == traverser { -my_invested * opp_reach_sum }
+                    else { (*pot * scale - my_invested) * opp_reach_sum }
+                }
+                TerminalType::Showdown => {
+                    let pot_scaled = *pot * scale;
+                    let my_invested = invested[traverser.index()] * scale;
+                    let win_payoff = pot_scaled - my_invested;
+                    let lose_payoff = -my_invested;
+                    let tie_payoff = pot_scaled / 2.0 - my_invested;
+                    let mut value = 0.0;
+                    match traverser {
+                        Player::OOP => {
+                            let my_score = oop_scores[hand_idx];
+                            for &j in &valid_ip_for_oop[hand_idx] {
+                                let j = j as usize;
+                                if opp_reach[j] < 1e-10 { continue; }
+                                let opp_score = ip_scores[j];
+                                value += opp_reach[j] * if my_score > opp_score { win_payoff } else if my_score < opp_score { lose_payoff } else { tie_payoff };
+                            }
+                        }
+                        Player::IP => {
+                            let my_score = ip_scores[hand_idx];
+                            for &i in &valid_oop_for_ip[hand_idx] {
+                                let i = i as usize;
+                                if opp_reach[i] < 1e-10 { continue; }
+                                let opp_score = oop_scores[i];
+                                value += opp_reach[i] * if my_score > opp_score { win_payoff } else if my_score < opp_score { lose_payoff } else { tie_payoff };
+                            }
+                        }
+                    }
+                    value
+                }
+            }
+        }
+        TreeNode::Action { node_id, player, children, actions, .. } => {
+            let num_actions = actions.len();
+            let nid = *node_id as usize;
+            if *player == traverser {
+                let cfr = match traverser {
+                    Player::OOP => river_oop_cfr,
+                    Player::IP => river_ip_cfr,
+                };
+                let mut strategy = vec![0.0f32; num_actions];
+                cfr.current_strategy(nid, river_bucket, &mut strategy);
+                let mut node_value = 0.0f64;
+                let mut action_vals = vec![0.0f32; num_actions];
+                for a in 0..num_actions {
+                    if strategy[a] < 0.001 && iter > 1000 && iter % 1000 != 0 { continue; }
+                    let av = cfr_traverse_river_template_ro(
+                        &children[a], traverser, hand_idx, river_bucket,
+                        opp_reach, oop_combos, ip_combos,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        scale, river_oop_cfr, river_ip_cfr, updates, iter,
+                    );
+                    action_vals[a] = av as f32;
+                    node_value += strategy[a] as f64 * av;
+                }
+                let reach_sum: f64 = opp_reach.iter().sum();
+                let reach_prob = if reach_sum > 0.0 { 1.0f32 } else { 0.0f32 };
+                updates.push(RegretUpdate {
+                    street: 2, node_id: nid, bucket: river_bucket,
+                    action_values: action_vals, node_value: node_value as f32, reach_prob,
+                });
+                node_value
+            } else {
+                let num_opp = opp_reach.len();
+                let opp_cfr = match traverser {
+                    Player::OOP => river_ip_cfr,
+                    Player::IP => river_oop_cfr,
+                };
+                let opp_buckets = match traverser {
+                    Player::OOP => river_ip_buckets,
+                    Player::IP => river_oop_buckets,
+                };
+                let opp_num_actions = opp_cfr.node_num_actions(nid) as usize;
+                let mut opp_strats = vec![0.0f32; num_opp * opp_num_actions];
+                for j in 0..num_opp {
+                    if opp_reach[j] > 0.0 {
+                        let bucket = opp_buckets[j] as usize;
+                        opp_cfr.current_strategy(nid, bucket, &mut opp_strats[j * opp_num_actions..(j + 1) * opp_num_actions]);
+                    }
+                }
+                let mut node_value = 0.0f64;
+                for a in 0..num_actions {
+                    let mut new_opp_reach = vec![0.0f64; num_opp];
+                    for j in 0..num_opp {
+                        if opp_reach[j] > 0.0 {
+                            new_opp_reach[j] = opp_reach[j] * opp_strats[j * opp_num_actions + a] as f64;
+                        }
+                    }
+                    node_value += cfr_traverse_river_template_ro(
+                        &children[a], traverser, hand_idx, river_bucket,
+                        &new_opp_reach, oop_combos, ip_combos,
+                        river_oop_buckets, river_ip_buckets,
+                        oop_scores, ip_scores, valid_ip_for_oop, valid_oop_for_ip,
+                        scale, river_oop_cfr, river_ip_cfr, updates, iter,
+                    );
+                }
+                node_value
+            }
+        }
+        TreeNode::Chance { .. } => unreachable!("River template should not contain chance nodes"),
     }
 }
 

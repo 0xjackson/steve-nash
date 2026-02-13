@@ -17,6 +17,7 @@
 /// Each "node" represents all info sets at one position in the game tree
 /// (one per hand combo of the acting player). Regrets and cumulative
 /// strategy weights are stored in parallel contiguous arrays.
+#[derive(Clone)]
 pub struct FlatCfr {
     regrets: Vec<f32>,
     cum_strategy: Vec<f32>,

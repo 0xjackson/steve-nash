@@ -2,55 +2,25 @@
 
 ## Vision
 
-A complete GTO poker solver built in Rust. Pre-solves all streets (preflop through river) for every common scenario. Queries return **instantly** (<1 second) from cached solutions. Pre-solve runs on Railway (cloud) in the background — each spot becomes usable the moment it finishes. Results download to local disk for permanent offline use.
+A complete GTO poker solver built in Rust. Pre-solves all streets (preflop through river) for every strategically distinct flop, every position pair, and both SRP and 3-bet pot types. Queries return **instantly** (<100ms) from cached solutions. Pre-solve runs locally in the background — each spot becomes usable the moment it finishes. Designed for **live online play** (Club GG and similar) with a local web UI for fast input.
 
-**User experience** (the end goal — interactive mode):
+**Primary interface** — localhost web UI:
+- Visual card grid (click hole cards + board cards)
+- Position buttons (UTG/HJ/CO/BTN/SB/BB)
+- Action buttons (Check/Bet 33%/Bet 66%/Bet 100%/Raise/Call/Fold)
+- Preflop action tracking (who opened, who called, who 3-bet)
+- Instant strategy display: action, bb amount, frequency, reasoning
+- All reads from pre-solved cache — zero latency
+
+**CLI shorthand** — for quick lookups:
 ```bash
-$ gto play
-Stack? 100
-Hand? AhQd
-Position? BTN
-→ RAISE 2.5bb (100%)
-
-# BB calls. CLI auto-tracks: pot=6, stack=97.5
-
-Board? Ks9d4c
-→ BET 33% (72%), CHECK (28%)
-
-Action? bet 33
-# BB calls. CLI auto-tracks: pot=10, stack=95.5
-
-Board? 7h
-→ CHECK (55%), BET 66% (45%)
-
-Action? check
-# BB checks. Pot stays 10.
-
-Board? Qc
-→ BET 66% (80%), BET 33% (12%), CHECK (8%)
-
-Action? bet 66
-# CLI auto-tracks: pot=23.2, stack=88.9
-
-Villain? raise 20
-→ CALL (85%), FOLD (15%)
-
-# Next hand — stack carries over
-Hand? JcTs
-Position? CO
-→ RAISE 2.5bb (92%), FOLD (8%)
+gto AhKs BTN                    # preflop
+gto AhKs BTN Ks9d4c             # flop (SRP assumed)
+gto AhKs BTN Ks9d4c xb          # flop, villain checked then bet — what do I do?
+gto AhKs BTN Ks9d4c7h           # turn
 ```
 
-Every query: **instant**. All the heavy math is pre-computed and cached after first solve. You just type your cards, the board as it comes, and what happened. The CLI tracks pot, stack, and position automatically.
-
-Also supports one-shot commands for quick lookups:
-```bash
-# Positional shorthand (no flags needed)
-gto AhQd BTN Ks9d4c7hQc 10
-
-# Or with flags for precision
-gto action AhQd --position BTN --board Ks9d4c7hQc --pot 10 --stack 95.5
-```
+**Key constraint**: All solvers are **2-player (heads-up)** — this is a fundamental limitation of CFR-based game theory. True multiway GTO is computationally intractable. For multiway pots, the system picks the primary villain (most relevant opponent) and applies a tightening heuristic.
 
 ---
 
@@ -63,9 +33,13 @@ gto action AhQd --position BTN --board Ks9d4c7hQc --pot 10 --stack 95.5
 | 3 | River solver | DONE | 1-5 sec/spot | Instant |
 | 4 | Turn solver (includes river) | DONE | 15-45 sec/spot | Instant |
 | 5 | Flop solver (includes turn+river) | DONE | 1-4 min/spot | Instant |
-| 6 | Infrastructure: CFR engine optimization | TODO | N/A | N/A |
-| 7 | Railway deployment + batch pre-solve | TODO | Background | Instant |
-| 8 | Unified CLI query interface | TODO | N/A | <1 sec |
+| 6 | CFR engine optimization | DONE | N/A | N/A |
+| 7 | Local batch pre-solve + query interface | DONE | Background | <1 sec |
+| 8 | Strategy engine + play mode (v1) | DONE | N/A | <1 sec |
+| 9 | Critical fixes (cache, data, navigation) | TODO | N/A | N/A |
+| 10 | Full batch expansion (1,755 flops + 3BP) | TODO | ~54 days | Instant |
+| 11 | Play mode rewrite + better output | TODO | N/A | N/A |
+| 12 | Local web UI | TODO | N/A | Instant |
 
 ---
 
@@ -74,68 +48,74 @@ gto action AhQd --position BTN --board Ks9d4c7hQc --pot 10 --stack 95.5
 ### How It Works
 
 ```
-PRE-SOLVE (Railway, one-time)                    USE (laptop, every hand)
-┌─────────────────────────┐                     ┌──────────────────────┐
-│ CFR+ solver grinds      │                     │ gto action AhQh ...  │
-│ through game trees      │  download cache     │         │            │
-│         │               │ ──────────────────> │    Load from disk    │
-│    Save to JSON cache   │   (~20-80 GB)       │         │            │
-│         │               │                     │  Look up strategy    │
-│ Each spot: 1s - 4min    │                     │         │            │
-│ Usable immediately      │                     │  Return answer <1s   │
-└─────────────────────────┘                     └──────────────────────┘
+PRE-SOLVE (local, one-time background)          USE (every hand, instant)
+┌──────────────────────────────┐                ┌─────────────────────────┐
+│ MCCFR solver grinds through  │                │ Web UI / CLI query      │
+│ all flop × position × pot    │                │         |               │
+│ type combinations            │                │    Load from disk       │
+│         |                    │                │         |               │
+│    Save to bincode cache     │                │  Navigate game tree     │
+│    (flop + turn + river      │                │  (action history)       │
+│     strategies together)     │                │         |               │
+│         |                    │                │  Return answer <100ms   │
+│ Each spot: 1-4 min           │                └─────────────────────────┘
+│ ~54 days for full coverage   │
+│ Resumable, runs in background│
+└──────────────────────────────┘
 ```
 
 ### Spot-Based Model
 
 Every scenario is a **spot**: a specific game state defined by:
-- Who is IP / OOP
-- What ranges each player has (from preflop solve)
-- Board cards
-- Pot size and effective stack
+- Who is IP / OOP (position pair, e.g., BTN vs BB)
+- What ranges each player has (derived from preflop solver)
+- Board cards (3 for flop — turn/river strategies embedded)
+- Pot size and effective stack (determines pot type: SRP or 3BP)
 - Allowed bet sizes
 
 Each spot is solved independently. This is the same approach PioSolver uses.
 
 ### Pre-Solve Coverage
 
-| Tier | Flops | Scenarios | Total Spots | Solve Time (Railway) | Storage | Coverage |
-|---|---|---|---|---|---|---|
-| Tier 1 | 50 common | 5 main | 250 | ~6 hours | 2-10 GB | ~60% |
-| Tier 2 | 200 common | 15 | 3,000 | ~2 days | 20-80 GB | ~90% |
-| Tier 3 | All 1,755 | 30 | 52,650 | ~2 weeks | 500 GB+ | 100% |
+| Pot Type | Flops | Position Pairs | Total Spots | Solve Time (local) | Storage |
+|---|---|---|---|---|---|
+| SRP (6bb pot, 97bb stack) | 1,755 | 9 | 15,795 | ~27 days | ~8 GB |
+| 3BP (20bb pot, 80bb stack) | 1,755 | 9 | 15,795 | ~27 days | ~8 GB |
+| **Total** | **1,755** | **9** | **31,590** | **~54 days** | **~16 GB** |
 
-**Recommended**: Tier 2. Covers 90% of real play for ~$20-40 in Railway compute. Results stored locally forever.
+Each flop solution includes embedded turn and river template strategies — no separate turn/river solves needed. Every street is instant from one flop solve.
+
+**Position pairs** (in priority order):
+1. BTN vs BB, CO vs BB, HJ vs BB, UTG vs BB, SB vs BB
+2. BTN vs SB, CO vs BTN, HJ vs BTN, UTG vs BTN
 
 ---
 
-## Phase 1: Push/Fold Solver — DONE
+## Phases 1–6: Core Solvers (DONE)
+
+### Phase 1: Push/Fold Solver — DONE
 
 SB shoves or folds, BB calls or folds. Nash equilibrium for any stack depth.
 
 **Files**: `src/game_tree.rs`, `src/cfr.rs`
 **Tests**: 13 integration tests in `tests/test_solver.rs`
 
----
+### Phase 2: Full Preflop Solver — DONE
 
-## Phase 2: Full Preflop Solver — DONE
-
-5-node game tree: open → 3-bet → 4-bet → 5-bet → call/fold. 15 spots for 6-max.
+5-node game tree: open -> 3-bet -> 4-bet -> 5-bet -> call/fold. 15 spots for 6-max.
 
 **Files**: `src/preflop_solver.rs`, CLI in `src/cli.rs`
 **Tests**: 15 integration tests in `tests/test_preflop_solver.rs`, 7 unit tests
 **Commands**: `gto solve preflop`, `gto range --solved`
 
-**Key decisions made**:
+**Key decisions**:
 - Spot-based 2-player decomposition
 - Single raise sizes (2.5bb open, 3x 3-bet, 2.5x 4-bet)
 - IP uses postflop action order (BTN last = most IP)
-- Equity realization: IP = raw equity, OOP = equity × 0.95
+- Equity realization: IP = raw equity, OOP = equity x 0.95
 - Disk cache at `~/.gto-cli/solver/`
 
----
-
-## Phase 3: River Solver — DONE
+### Phase 3: River Solver — DONE
 
 Heads-up river CFR+ solver with exact showdown evaluation at the combo level.
 
@@ -143,357 +123,367 @@ Heads-up river CFR+ solver with exact showdown evaluation at the combo level.
 **Tests**: 17 tests in `tests/test_river_solver.rs` + 5 unit tests in `src/postflop_tree.rs`
 **Commands**: `gto solve river --board --oop --ip --pot --stack --iterations`
 
-**Key decisions made**:
-- Exact combo-level computation (not bucketed) — river is small enough
-- Blocker-aware showdown precomputation: evaluate each combo once via `evaluate_fast()`, build validity tables
-- Alternating-traverser CFR+ with per-hand sequential tree traversal and `opp_reach` vector propagation
-- Reuses existing `CfrTrainer`/`InfoSetKey`/`InfoSetData` from `src/cfr.rs`
-- `postflop_tree.rs` is generic — reusable for turn/flop solvers
+**Key decisions**:
+- Exact combo-level computation (not bucketed)
+- Blocker-aware showdown precomputation via `evaluate_fast()`
+- Alternating-traverser CFR+ with `opp_reach` vector propagation
 - Exploitability via best-response traversal
-- Cache to `~/.gto-cli/solver/river_{board}_{pot}_{stack}.json`
+- Cache to `~/.gto-cli/solver/river_{board}_{pot}_{stack}.bin`
 
-**Architecture**:
-- `src/postflop_tree.rs`: `TreeNode` enum (Action/Terminal), `TreeConfig`, `build_tree()` with configurable bet/raise sizes, max raises, all-in clamping
-- `src/river_solver.rs`: `ShowdownTable` (precomputed scores + blocker tables), `solve_river()`, `compute_exploitability()`, strategy extraction, caching, display
-
-### Known Performance Issues (to address before Phase 4)
-
-These are functional but suboptimal. Phase 4 (turn solver) will need these fixed to scale:
-
-1. **Single-threaded CFR iteration**: Each combo's tree traversal is independent but all mutate the shared `CfrTrainer`. Fix: collect regret updates per-combo into thread-local buffers, batch-apply after all combos. Enables rayon parallelization.
-
-2. **opp_reach vector allocation**: A new `Vec<f64>` is heap-allocated at every opponent action node × every action × every iteration. For 1000 combos × 30 nodes × 5 actions × 10K iterations = ~1.5 billion allocations. Fix: pre-allocate a stack of reusable buffers sized to max(num_oop, num_ip), pass by mutable reference through recursion.
-
-3. **Strategy snapshot per iteration**: A fresh `HashMap<u16, Vec<Vec<f64>>>` is built every iteration to snapshot opponent strategies (avoids borrow conflict with trainer). Fix: allocate the snapshot structure once before the iteration loop, overwrite values in-place each iteration instead of rebuilding.
-
-4. **HashMap-based CfrTrainer**: The `HashMap<InfoSetKey, InfoSetData>` with `Vec<f64>` per info set is ~120 bytes per entry + hash overhead. Phase 4 introduces `FlatCfr` with contiguous f32 arrays (~24 bytes per info set, zero overhead). This is the biggest win for turn/flop scale.
-
----
-
-## Phase 4: Turn Solver — DONE
+### Phase 4: Turn Solver — DONE
 
 Heads-up turn+river CFR+ solver with chance nodes for river card dealing and flat-array storage.
 
-**Files**: `src/flat_cfr.rs`, `src/turn_solver.rs`, `src/postflop_tree.rs` (modified), `src/cli.rs` (modified)
-**Tests**: 9 integration tests in `tests/test_turn_solver.rs`, 9 unit tests in `src/flat_cfr.rs`, 5 tree tests in `src/postflop_tree.rs`
-**Commands**: `gto solve turn --board Ks9d4c7h --oop AA,KK --ip QQ,JJ --pot 10 --stack 20 --iterations 5000`
+**Files**: `src/flat_cfr.rs`, `src/turn_solver.rs`, `src/postflop_tree.rs`, `src/cli.rs`
+**Tests**: 9 integration tests, 9 unit tests in `src/flat_cfr.rs`, 5 tree tests
 
-**Key decisions made**:
-- `FlatCfr` engine with contiguous f32 arrays (~5x memory reduction vs HashMap-based `CfrTrainer`)
-- Node-based layout: `offsets[node] + hand * num_actions + action` for cache-friendly access
-- Two `FlatCfr` instances (one per player) to avoid borrow conflicts — no snapshot needed
-- `Chance` variant added to `TreeNode` enum, with `stacks` added to `Terminal` variant
-- `build_turn_tree()` builds turn action tree then transforms Showdown terminals into Chance nodes with river subtrees
-- Full river enumeration (~48 cards), hand strengths re-evaluated per river card via `evaluate_fast()`
-- Separate `cfr_traverse_turn` (handles action + chance nodes) and `cfr_traverse_river` (handles river subtrees with 5-card showdown eval)
-- Blocker-aware reach propagation: combos conflicting with dealt river card get zeroed out
+**Key decisions**:
+- `FlatCfr` engine with contiguous f32 arrays (~5x memory reduction vs HashMap)
+- Node-based layout: `offsets[node] + hand * num_actions + action`
+- Two `FlatCfr` instances (one per player) — no snapshot needed
+- Full river enumeration (~48 cards), hand strengths re-evaluated per river card
 - Turn bet sizes: 50%, 100% pot. River bet sizes: 33%, 67%, 100% pot
-- Cache to `~/.gto-cli/solver/turn_{board}_{pot}_{stack}.json`
 
-**Architecture**:
-- `src/flat_cfr.rs`: `FlatCfr` struct with f32 contiguous arrays, regret matching, CFR+ update
-- `src/postflop_tree.rs`: `Chance` node variant, `TurnTreeConfig`, `build_turn_tree()`, `collect_node_metadata()`
-- `src/turn_solver.rs`: `solve_turn()`, two-level traversal (turn + river), exploitability via best-response, caching, display
-
----
-
-## Phase 5: Flop Solver — DONE
+### Phase 5: Flop Solver — DONE
 
 External Sampling MCCFR with template trees and equity-based hand bucketing.
 
-**Files**: `src/bucketing.rs`, `src/flop_solver.rs`, `src/cli.rs` (modified), `src/lib.rs` (modified), `src/main.rs` (modified)
-**Tests**: 10 integration tests in `tests/test_flop_solver.rs`, 6 unit tests in `src/bucketing.rs`
-**Commands**: `gto solve flop --board Ks9d4c --oop AA,KK,QQ,AKs --ip JJ,TT,99,AQs --pot 10 --stack 50 --iterations 500000`
+**Files**: `src/bucketing.rs`, `src/flop_solver.rs`, `src/cli.rs`, `src/lib.rs`, `src/main.rs`
+**Tests**: 10 integration tests, 6 unit tests in `src/bucketing.rs`
 
-**Key decisions made**:
-- **Template trees**: 3 separate single-street action trees instead of one massive composite tree
-  - Flop tree: built with actual pot/stack (~12 nodes)
-  - Turn template: built with pot=1.0, stack=100.0 (~10 nodes), scaled at runtime
-  - River template: built with pot=1.0, stack=100.0 (~12 nodes), scaled at runtime
-  - Template scaling: `actual_value = template_value × pot_at_street_start`
-- **6 FlatCfr instances**: 1 per player × 3 streets, total ~1 MB memory
-- **Equity-based hand bucketing**: ~200 buckets per street via equal-frequency equity binning (not k-means — simpler, equally effective)
-  - River: exhaustive equity evaluation (5-card board)
-  - Flop/turn: Monte Carlo equity vs random (~200-500 samples)
-- **External sampling MCCFR**: each iteration samples one turn card + one river card, traverses all 3 street trees
+**Key decisions**:
+- **Template trees**: 3 separate single-street action trees (flop, turn template, river template)
+- **6 FlatCfr instances**: 1 per player x 3 streets, total ~1 MB memory
+- **Equity-based hand bucketing**: ~200 buckets per street via equal-frequency binning
+- **External sampling MCCFR**: each iteration samples one turn + one river card
 - **Bet sizes**: Flop 33%/75%, Turn 66%, River 50%/100%
-- **Blocker handling**: combos conflicting with sampled turn/river cards are skipped, opponent reach zeroed
-- **Exploitability**: Monte Carlo estimate via best-response sampling (100 runouts)
-- **Solution extraction**: combo-level strategies from bucket-level FlatCfr (map combo→bucket→strategy)
-- Cache to `~/.gto-cli/solver/flop_{board}_{pot}_{stack}.json`
+- Cache to `~/.gto-cli/solver/flop_{board}_{pot}_{stack}.bin`
 
-**Architecture**:
-- `src/bucketing.rs`: `combo_equity_vs_random()` (Monte Carlo + exhaustive), `assign_buckets()` (equal-frequency binning)
-- `src/flop_solver.rs`: `solve_flop()`, three-level traversal (`cfr_traverse_flop` → `cfr_traverse_turn_template` → `cfr_traverse_river_template`), best-response exploitability, caching, display
+**Critical finding (Phase 9 fix)**: The flop solver trains turn and river FlatCfr instances during MCCFR but `extract_solution` only saves flop-level strategies. Turn and river data is computed then **thrown away**. Phase 9 fixes this.
 
----
+### Phase 6: CFR Engine Optimization — DONE
 
-## Phase 6: CFR Engine Optimization
-
-Performance-critical optimizations applied after core functionality works.
-
-### Steps
-
-**6.1**: SIMD batch evaluation
-- Use SIMD intrinsics for batch hand evaluation (evaluate 4-8 hands simultaneously)
-- Target: 100M+ evals/sec (up from 10-50M)
-
-**6.2**: Parallel CFR iterations
-- Rayon parallelization of hand traversal within each CFR iteration
-- Each hand's subtree traversed independently on separate threads
-- Expected: ~4-6x speedup on 8-core Railway instances
-
-**6.3**: Regret pruning
-- Skip traversal of actions with cumulative regret < threshold
-- Re-check periodically (every 1000 iterations)
-- Expected: 2-3x speedup per iteration
-
-**6.4**: Compressed cache format
-- Switch from JSON to bincode or MessagePack for cached solutions
-- Expected: 5-10x smaller files, faster load times
-- JSON kept as optional export format
+- Rayon parallel hand traversal for flop solver
+- Regret pruning in CFR traversal functions
+- Precomputed bucket and score lookup tables
+- Bincode serialization (5-10x smaller than JSON, faster load)
 
 ---
 
-## Phase 7: Railway Deployment + Batch Pre-Solve
+## Phase 7: Local Batch Pre-Solve — DONE
 
-### Architecture
+*Adapted from original Railway cloud deployment plan to local-only solving.*
 
+**Files**: `src/batch.rs`, `src/cli.rs`
+**Commands**: `gto solve batch [--stack 100] [--srp-only] [--iterations 500000] [--limit N]`
+
+**What was built**:
+- Batch solve orchestrator with resumability (skips existing cache files)
+- 50 representative flop boards covering major textures (high dry, broadway, connected, low, monotone, paired, wheel)
+- 9 position pairs in priority order
+- SRP pot type with optional 3-bet pots
+- Progress output: `[47/450] Solving AsKd7c BTN vs BB (SRP) ... done (1.2 min)`
+- Range derivation from preflop solver (>5% threshold)
+
+**Known issues** (fixed in Phase 9):
+- Cache key missing position pair — solutions overwrite each other
+- Only 50 hardcoded flops instead of all 1,755
+- Turn/river data not saved from flop solve
+
+---
+
+## Phase 8: Strategy Engine + Play Mode (v1) — DONE
+
+**Files**: `src/strategy.rs`, `src/play.rs`, `src/cli.rs`, `src/main.rs`
+
+**What was built**:
+- `StrategyEngine`: loads preflop solution, derives postflop ranges, routes queries to correct solver (flop/turn/river), cache-or-solve-on-demand logic
+- `gto query AhKs BTN [Ks9d4c]`: one-shot query command
+- Shorthand detection: `gto AhKs BTN Ks9d4c` auto-prepends "query"
+- `gto play`: interactive mode (hand -> position -> board -> advice per street)
+- `PotType` enum (SRP/3BP/4BP) with standard pot/stack values
+- Default villain mapping (BTN->BB, CO->BB, etc.)
+- Combo lookup with both orderings (AhKs and KsAh)
+- Pretty display with unicode suit symbols
+- Heuristic fallback when solver unavailable
+
+**Known issues** (fixed in Phase 9 and 11):
+- **Root-node only**: `lookup_in_flop_solution` always returns the first matching node (root). No action sequence navigation — if villain bets, raises, or checks, you still get the same answer.
+- **No hero/villain action separation**: Play mode asks one "What happened?" prompt instead of tracking hero and villain actions separately.
+- **Always assumes SRP**: Hardcoded pot=6, stack=97. No 3-bet or 4-bet pot detection.
+- **No multiway support**: Always assumes HU (2 players).
+- **Raw frequency output**: Shows "CHECK (45%), BET 33% (30%)" without bb amounts or clear recommendation.
+
+---
+
+## Phase 9: Critical Fixes — TODO
+
+*Must be completed before any batch runs, or batch output is wasted.*
+
+### 9.1: Fix cache key to include position pair
+
+**Problem**: Cache path is `flop_{board}_{pot}_{stack}.bin`. BTN vs BB and CO vs BB on the same board have different ranges but the same cache key. Whichever solves last overwrites the other — **8 of 9 position pair solutions are lost**.
+
+**Fix**: Change cache path to `flop_{board}_{pot}_{stack}_{oop_pos}_{ip_pos}.bin`. Apply to all three solver caches (flop, turn, river).
+
+**Files**: `src/flop_solver.rs` (cache_path, load_cache), `src/turn_solver.rs`, `src/river_solver.rs`, `src/strategy.rs` (load calls)
+
+**Impact**: Accuracy — critical. Without this, batch pre-solve is wasted.
+**Compute**: Zero. **Effort**: ~30 min.
+
+### 9.2: Save turn/river template strategies from flop solve
+
+**Problem**: The flop solver trains 6 FlatCfr instances (flop/turn/river x OOP/IP) during MCCFR. `extract_solution()` only saves flop-level strategies. The turn and river FlatCfr data is **computed then discarded**.
+
+When a user later queries the turn or river, the system runs a **separate** turn/river solver from scratch (15-45s for turn, 1-5s for river) — recomputing data that already existed.
+
+**Fix**:
+1. Add turn/river FlatCfr data to `FlopSolution` struct (the 4 template FlatCfr instances: turn_oop, turn_ip, river_oop, river_ip)
+2. Add turn/river bucket mappings to `FlopSolution` (combo -> bucket for each sampled turn/river card)
+3. Modify `extract_solution()` to serialize the template FlatCfr data
+4. Add `query_turn_from_flop()` and `query_river_from_flop()` to `StrategyEngine`
+5. Modify `query_turn()` and `query_river()` to check flop solution first before running a separate solver
+
+**Accuracy**: Bucket-level (~200 buckets) — same accuracy as the flop strategy itself. Not as precise as a dedicated combo-level turn/river solve, but ~95%+ same answer and instant.
+
+**Cache size**: ~200KB -> ~500KB per spot. Total for full batch: ~8 GB (SRP) or ~16 GB (SRP + 3BP).
+
+**Compute**: Zero extra solve time — data is already computed.
+**Effort**: ~2-3 hours.
+
+### 9.3: Action sequence navigation in strategy lookups
+
+**Problem**: `lookup_in_flop_solution()` (strategy.rs:372-374) iterates `solution.strategies` and returns the **first** `FlopNodeStrategy` matching hero's side. This is always the root node — what to do when first to act.
+
+If villain bets into you, raises your bet, or checks (and you need to decide facing a check), the system returns the **wrong answer** — it always says what to do at the start of the street.
+
+The data IS there: `FlopSolution.strategies` contains `FlopNodeStrategy` entries for every action node in the tree, each with a `node_id`. The postflop tree has a defined structure: root -> check/bet -> call/raise/fold -> etc.
+
+**Fix**:
+1. Add `action_path: Vec<String>` parameter to lookup functions
+2. Map action strings ("check", "bet_33", "bet_75", "raise", "call") to tree edges
+3. Traverse from root following the action path to find the correct `node_id`
+4. Return the strategy at that node
+5. Add node-to-parent and node-to-action mappings in `FlopNodeStrategy` or a separate tree index structure
+
+**Example**: Hero is OOP on flop. Hero checks. Villain bets 33% pot. What should hero do?
+- Action path: `["check", "bet_33"]` (OOP checked, IP bet 33%)
+- Navigate tree: root (OOP acts) -> check action -> IP decision node -> bet 33% action -> OOP facing bet node
+- Return OOP's strategy at that node: `CALL 55%, RAISE 30%, FOLD 15%`
+
+**Impact**: Accuracy — massive. Goes from "correct 1 out of ~5 decision points per street" to "correct at every decision point."
+**Compute**: Zero (tree traversal, not solving).
+**Effort**: ~3-4 hours.
+
+---
+
+## Phase 10: Full Batch Expansion — TODO
+
+*After Phase 9 fixes. Kick off and let run in background for ~54 days.*
+
+### 10.1: Generate all 1,755 strategically distinct flops
+
+**Problem**: Batch has 50 hardcoded representative flops. There are 22,100 possible 3-card flops (52C3), but many are strategically equivalent due to suit isomorphism. E.g., Ks9d4c and Kd9s4h play identically (same ranks, same suit pattern). After removing suit isomorphisms, there are **1,755** distinct flops.
+
+**Fix**: Write an algorithmic flop enumerator that generates all 1,755 canonical flops using suit isomorphism reduction.
+
+**Coverage**: 50 flops (~60%) -> 1,755 flops (100%).
+**Compute**: 450 spots -> 15,795 spots (SRP). Solve time: ~27 days.
+**Effort**: ~2 hours.
+
+### 10.2: Add 3-bet pot support
+
+**Problem**: 3-bet pots are ~20-30% of hands played. SPR ~4 (3BP) vs SPR ~16 (SRP) means completely different strategy. Overpairs go all-in in 3BP but play cautiously in SRP. Currently every 3-bet pot answer uses SRP parameters and is **wrong**.
+
+**Fix**: Run batch with `srp_only: false`. Solves each flop for both:
+- SRP: 6bb pot, 97bb stack (SPR ~16)
+- 3BP: 20bb pot, 80bb stack (SPR ~4)
+
+**Compute**: Doubles the batch. 15,795 -> 31,590 spots. ~54 days total.
+**Disk**: ~16 GB.
+**Effort**: ~1 hour (batch already supports `srp_only: false`, just needs the flag).
+
+### 10.3: Optimize batch iteration order
+
+**Problem**: Current batch iterates position pairs as outer loop, boards as inner. After 12 hours (~288 spots), only BTN vs BB is covered with ~288 boards. Zero coverage for CO vs BB, HJ vs BB, etc.
+
+**Fix**: Interleave: for each board, solve all position pairs before moving to the next board. This way the most common boards get full position coverage first.
+
+**Priority ordering**:
+1. High-card boards (A-high, K-high) — most common in real play
+2. Broadway connected boards (KQT, JTs) — frequent, complex
+3. Paired boards — common, unique strategy
+4. Medium connected boards (987, 864)
+5. Low boards, monotone, wheel boards
+6. Everything else
+
+**Impact**: After 12 hours, ~32 boards fully covered across all 9 positions instead of 288 boards for one position.
+**Effort**: ~1 hour.
+
+### 10.4: Pre-solve resource requirements
+
+| Resource | Amount | Notes |
+|---|---|---|
+| **Disk** | ~16 GB | 31,590 spots x ~500 KB each |
+| **RAM** | ~1.5 GB | One spot at a time, memory recycled |
+| **CPU** | 100% all cores | Rayon parallelizes within each solve |
+| **Time** | ~54 days | 27 days SRP + 27 days 3BP |
+| **Resumability** | Yes | Skips already-cached spots on restart |
+
+Mac remains usable during batch — the solver uses ~1.5 GB RAM and runs in background. Can be stopped and resumed at any time.
+
+---
+
+## Phase 11: Play Mode Rewrite + Better Output — TODO
+
+### 11.1: Proper action tracking (hero vs villain)
+
+**Problem**: Current play mode asks one generic "What happened?" prompt after showing advice. It doesn't know WHO acted or WHAT they did. Can't navigate the game tree without this.
+
+**Fix**: Complete rewrite of the postflop action loop:
+1. Determine who acts first (OOP player)
+2. Show advice for the acting player
+3. Ask "Your action?" (if hero acts) or "Villain action?" (if villain acts)
+4. Record the action, update pot/stack
+5. Navigate to the next tree node
+6. Show advice for the next decision point
+7. Repeat until end of street or fold
+
+**Example flow** (hero is IP):
 ```
-Railway Instance (Pro plan, 32 GB RAM, 8 vCPU)
-├── Solver binary (compiled for linux-x86_64)
-├── Job queue: list of spots to solve
-├── Progress tracking
-├── Persistent volume: cached solutions
-└── API endpoint OR rsync access for downloading results
-```
-
-### Steps
-
-**7.1**: Dockerfile + Railway config
-- Multi-stage Rust build (compile in builder, copy binary to slim runtime)
-- Railway persistent volume mounted at `/data/solver/`
-- Environment vars for config (iterations, bet sizes, etc.)
-
-**7.2**: Batch solve orchestrator
-- `gto solve batch` command: takes a manifest of spots to solve
-- Solves preflop first (~3 min), then flops in priority order
-- Progress output: `[47/3000] Solving AsKd7c BTN vs BB ... done (1.2 min)`
-- Spots usable immediately as each one finishes
-- Resumable: skips already-cached spots on restart
-
-**7.3**: Flop prioritization
-- Solve most common flop textures first:
-  1. High-card boards (A-high, K-high): ~40 flops
-  2. Paired boards: ~30 flops
-  3. Connected boards: ~40 flops
-  4. Monotone/two-tone: ~40 flops
-  5. Low boards: ~50 flops
-  6. Everything else: remaining ~1,555
-
-**7.4**: Download + local storage
-- `gto sync` command: rsync cached solutions from Railway to laptop
-- Or: Railway exposes simple HTTP API, CLI fetches solutions on demand
-- Local cache at `~/.gto-cli/solver/`
-- Incremental: only downloads new/updated solutions
-
-### Cost Estimate
-
-| Tier | Spots | Railway Time | Cost |
-|---|---|---|---|
-| Tier 1 (60% coverage) | 250 | ~6 hours | ~$2-7 |
-| Tier 2 (90% coverage) | 3,000 | ~2 days | ~$20-40 |
-| Full (100%) | 52,650 | ~2 weeks | ~$300-750 |
-
-After pre-solve: kill the instance, stop paying. Solutions stored locally forever.
-
----
-
-## Phase 8: Unified CLI Query Interface
-
-### Overview
-
-Two modes of interaction, both reading from the same cache. **All solutions are cached after first solve** — the first time a spot is solved (either via pre-solve on Railway or on-the-fly), the result is saved to disk. Every subsequent query for that spot is instant. The cache grows over time as you play more hands.
-
-### Mode 1: Interactive Play Mode (Primary — for live play)
-
-`gto play` — a stateful interactive session that tracks your hand through every street. You only input what changes. The CLI handles pot math, stack tracking, and street detection automatically.
-
-```bash
-$ gto play
-Stack? 100
-
-Hand? AhQd
-Position? BTN
-→ RAISE 2.5bb (100%)
-
-# Tell the CLI what happened
-Action? raise 2.5
-Villain? BB calls
-# CLI auto-computes: pot=6, hero_stack=97.5
-
-Board? Ks9d4c
-→ BET 33% (72%), CHECK (28%)
-
-Action? bet 33
-Villain? call
-# CLI auto-computes: pot=10, hero_stack=95.5
-
-Board? 7h
-→ CHECK (55%), BET 66% (45%)
-
-Action? check
+Board: Ks 9d 4c  |  Pot: 6bb  |  Stack: 97bb
+Villain (BB) acts first...
 Villain? check
-# Pot stays 10.
+  -> Your turn (BTN, IP):
+  -> BET 2bb (72%), CHECK (28%)
+Your action? bet 2
+Villain? call
+  Pot: 10bb  |  Stack: 95bb
 
-Board? Qc
-→ BET 66% (80%), BET 33% (12%), CHECK (8%)
-
-Action? bet 66
-Villain? raise 20
-→ CALL (85%), FOLD (15%)
-
-Action? call
-# Hand over. CLI shows result.
-
-# Next hand — stack carries over from previous hand
-Hand? JcTs
-Position? CO
-→ RAISE 2.5bb (92%), FOLD (8%)
+Turn: 7h
+Villain? bet 7
+  -> Facing bet (70% pot):
+  -> CALL (55%), RAISE to 22bb (25%), FOLD (20%)
 ```
 
-**State tracked automatically:**
-- Hero stack (carries across hands, updated by wins/losses)
-- Pot size (updated by each action)
-- Board cards (appended each street)
-- Villain range (narrowed by their actions — e.g., BB cold-called preflop → use BB defend range)
-- Street (detected from board card count)
-- Position / IP-OOP (set once per hand)
+### 11.2: Preflop action sequence tracking
 
-**Commands within interactive mode:**
-- `Hand? XxXx` — start new hand
-- `Board? XxXx` — add board cards (new street)
-- `Action? bet 33 / check / call / fold / raise 20` — what hero did
-- `Villain? call / raise 15 / bet 10 / check / fold` — what villain did
-- `stack 95` — manually override stack
-- `pot 20` — manually override pot
-- `new` — new hand (reset board, keep stack)
-- `quit` — exit
+**Problem**: Play mode always assumes SRP (6bb pot, 97bb stack). No way to indicate the pot was 3-bet or 4-bet, and no way to specify who opened or who called.
 
-### Mode 2: One-Shot Commands (for quick lookups / study)
+**Fix**:
+1. After position, ask: "Preflop action? (open/call/3bet/4bet)" or detect from solver
+2. Track: who opened, any callers, any 3-bettors
+3. Auto-determine pot type: SRP (open + call), 3BP (open + 3bet + call), 4BP (open + 3bet + 4bet + call)
+4. Set pot/stack accordingly: SRP=6/97, 3BP=20/80, 4BP=44/56
+5. Determine villain (the aggressor or the caller, depending on hero's position)
 
-**Positional shorthand** (fastest to type):
+### 11.3: Multiway pot handling
+
+**Problem**: Real games have 3-4 players seeing the flop. The solver is 2-player only.
+
+**Fix**:
+1. Ask "How many players to flop?" (default 2)
+2. If multiway (>2), pick primary villain: the player with position on hero, or the preflop aggressor
+3. Solve HU between hero and primary villain
+4. Apply tightening heuristic: multiply bet/raise thresholds by ~0.7 for 3-way, ~0.5 for 4-way
+5. Display note: "Multiway (3 players) — tighten ranges, play more cautiously"
+
+This is the standard approach — PioSolver and all other GTO tools are also 2-player only.
+
+### 11.4: Better strategy output
+
+**Problem**: Raw frequencies like "CHECK (45%), BET 33% (30%)" aren't useful for live play. Need actual bb amounts and a clear recommendation.
+
+**Fix**:
+1. Show bb amounts: "BET 2bb (33% pot, 45%)" instead of "BET 33% (45%)"
+2. Show clear recommendation: "Lean CHECK here" (for the highest-frequency action)
+3. Show brief reasoning when available: hand strength vs board texture
+4. Show equity when calculated: "Your equity: 62% vs villain's range"
+
+**Example output**:
+```
+-> CHECK (45%) | BET 2bb, 33% pot (30%) | BET 5bb, 75% pot (25%)
+   Lean: CHECK — medium-strength hand, control the pot
+   Equity: 58% vs BB defend range
+```
+
+### 11.5: Enhanced one-liner shorthand with action history
+
+**Fix**: Extend the `gto query` shorthand to support action sequences after the board:
 ```bash
-gto AhQd BTN                           # preflop
-gto AhQd BTN Ks9d4c 6                  # flop, pot=6
-gto AhQd BTN Ks9d4c7h 10              # turn, pot=10
-gto AhQd BTN Ks9d4c7hQc 10            # river, pot=10
+gto AhKs BTN Ks9d4c xb       # OOP checked (x), IP bet (b) — what does hero do?
+gto AhKs BTN Ks9d4c xbc       # OOP checked, IP bet, OOP called — (next street)
+gto AhKs BTN Ks9d4c7h xbcx    # turn: OOP checked after action on flop
 ```
 
-Format: `gto <HAND> <POSITION> [BOARD] [POT] [STACK]`
-- Stack defaults to 100bb if omitted
-- Villain defaults based on position context
+Action codes: `x` = check, `b` = bet, `c` = call, `r` = raise, `f` = fold.
 
-**Flag syntax** (for precision):
-```bash
-gto action AhQd --position BTN --board Ks9d4c7hQc --pot 10 --stack 95.5 --vs BB
+---
+
+## Phase 12: Local Web UI — TODO
+
+### 12.1: Localhost web app
+
+A simple web server (Rust `axum` or similar) serving a local page at `localhost:3000`. Designed for speed — click, don't type.
+
+**Layout**:
+```
+┌─────────────────────────────────────────────────┐
+│  GTO Advisor              [SRP] [3BP] [4BP]     │
+├─────────────────────────────────────────────────┤
+│  Your cards: [card grid — click 2]              │
+│  Position:   [UTG][HJ][CO][BTN][SB][BB]         │
+│  Preflop:    [Open][Call][3Bet][4Bet]            │
+│  Players:    [2][3][4]                           │
+├─────────────────────────────────────────────────┤
+│  -> RAISE 2.5bb (92%) | FOLD (8%)               │
+├─────────────────────────────────────────────────┤
+│  Board: [card grid — click 3/1/1]               │
+│  Villain: [Check][Bet 33%][Bet 66%][Bet 100%]   │
+├─────────────────────────────────────────────────┤
+│  -> CALL 4bb (55%) | RAISE 12bb (25%) | FOLD    │
+│     Lean: CALL — top pair good kicker, pot ctrl  │
+│     Equity: 62% vs villain range                 │
+└─────────────────────────────────────────────────┘
 ```
 
-### Caching Behavior
+**Tech stack**:
+- Backend: Rust `axum` web server, reads from same `~/.gto-cli/solver/` cache
+- Frontend: Single HTML page with vanilla JS (no framework needed)
+- API: `/api/query` endpoint accepting hand, position, board, actions, pot type
+- Served on `localhost:3000` — no network, no auth, instant
 
-**Every query returns in 1-3 seconds, always.** No exceptions, no blocking solves. The cache is permanent and grows over time.
+**Input speed**: 3-5 seconds per decision (click cards + click action). Fast enough for online play with 15-30 second time banks.
 
-```
-Query for a spot:
-  ├─ Cache hit?  → Return instantly (<100ms)
-  └─ Cache miss? → Return closest cached match instantly (<1 sec)
-                    + Queue background solve for exact spot
-                    + Next query for this spot → exact cache hit
-```
+### 12.2: Future — screen reader overlay (stretch goal)
 
-**Cache location**: `~/.gto-cli/solver/`
+Read the poker client window directly (OCR or pixel detection). Auto-detect cards, position, board, pot size. Show advice in an overlay. Game-specific parsing for Club GG.
 
-**After pre-solving on Railway** (Tier 2: ~3,000 spots), ~90% of queries are exact cache hits. The remaining ~10% use closest-match approximation the first time (95%+ same answer), then become exact cache hits after the background solve completes. The more you play, the fewer approximations — after a few weeks of regular use, virtually everything is cached.
-
-**Cache is portable**: Copy `~/.gto-cli/solver/` to any machine. Share with friends. Back up to cloud storage. It's just JSON files on disk.
-
-### Closest-Match Fallback (All Streets)
-
-When ANY spot (river, turn, or flop) isn't cached, the system **always returns instantly** using the closest cached match. It never blocks on a solve.
-
-Matching criteria:
-1. **Board texture similarity**:
-   - Same high card rank
-   - Same suit pattern (monotone/two-tone/rainbow)
-   - Same connectedness (connected/gapped/disconnected)
-2. **Same street** (river matches river, turn matches turn, etc.)
-3. **Closest SPR** (stack-to-pot ratio)
-4. **Same position matchup** (BTN vs BB, etc.)
-
-Display with a disclaimer:
-```
-(closest match: Ks9d4c — yours: Ks9d5c)
-→ BET 33% (72%), CHECK (28%)
-Solving exact spot in background...
-```
-
-Background solve priority:
-- River: completes in 1-5 sec (cached almost immediately)
-- Turn: completes in 15-45 sec (cached before next hand)
-- Flop: completes in 1-4 min (cached for next session)
-
-### Steps
-
-**8.1**: Interactive play mode (`gto play` rewrite)
-- Replace existing `gto play` with solver-backed interactive mode
-- State machine: tracks hand, position, board, pot, stack, villain range
-- Parse action inputs: "bet 33", "check", "call", "raise 20", "fold"
-- Parse villain inputs: "call", "raise 15", "bet 10", "check", "fold"
-- Auto-compute pot and stack after each action
-- Detect street from board card count, route to correct solver cache
-
-**8.2**: One-shot positional command
-- `gto <HAND> <POSITION> [BOARD] [POT] [STACK]` — positional args, no flags
-- Smart defaults: stack=100bb, villain inferred from position
-- Detect street from board length (0=preflop, 6chars=flop, 8=turn, 10=river)
-
-**8.3**: Cache-or-solve logic (always-instant)
-- Check cache first (instant, <100ms)
-- On miss for ANY street: return closest cached match instantly (<1 sec)
-- Queue background solve for exact spot (async, non-blocking)
-- Background solve caches result — next query for this spot is exact
-- Closest-match scoring: board texture similarity + SPR proximity + same position matchup
-- River background solves complete in ~1-5 sec, turn ~15-45 sec, flop ~1-4 min
-
-**8.4**: Villain range narrowing
-- Track villain actions through the hand
-- Preflop: "BB calls" → load BB defend range from preflop solver
-- Postflop: use the cached strategy to infer villain's continuing range
-- Each street narrows the range based on what villain did
+This is a much larger project and not needed for v1.
 
 ---
 
 ## Performance Summary
 
-### Solve Times (one-time, background on Railway)
+### Solve Times (one-time, background)
 
 | Street | Per Spot | Iterations | Memory | Accuracy |
 |---|---|---|---|---|
 | Preflop | 3-5 sec | 50K | <1 MB | <0.15 bb exploit |
 | River | 1-5 sec | 10K | <10 MB | <0.1% pot |
 | Turn | 15-45 sec | 50K | 50-200 MB | <0.5% pot |
-| Flop | 1-4 min | 1M MCCFR | 0.5-1.5 GB | <1% pot |
+| Flop | 1-4 min | 500K-1M MCCFR | 0.5-1.5 GB | <1% pot |
 
 ### Query Times (user experience, from cache)
 
-**Every query: <1 second.** Always. Regardless of street.
+**Every query: <100ms.** Flop, turn, and river all served from the cached flop solution. No separate turn/river solves needed after Phase 9.
 
-### Total Pre-Solve for 90% Coverage
+### Total Pre-Solve for Full Coverage
 
-- **Time**: ~2 days on Railway
-- **Cost**: ~$20-40
-- **Storage**: 20-80 GB on disk
-- **Result**: Instant GTO answers for ~90% of poker situations, forever, offline
+- **Time**: ~54 days running in background (27 SRP + 27 3BP)
+- **Storage**: ~16 GB on disk
+- **RAM**: ~1.5 GB during solving
+- **Result**: Instant GTO answers for 100% of flop textures, all position pairs, SRP + 3-bet pots, all streets
 
 ---
 
@@ -501,18 +491,50 @@ Background solve priority:
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| CFR storage (postflop) | Flat f32 arrays | 10x less memory than HashMap + f64 |
-| River algorithm | CFR+ (full traversal) | Small tree, fast convergence |
-| Turn algorithm | CFR+ (full river enumeration) | Only ~45 river cards, exact is feasible |
+| Solver algorithm | 2-player CFR+/MCCFR | Multiway GTO is intractable; HU with heuristic adjustment is industry standard |
+| CFR storage (postflop) | Flat f32 arrays (`FlatCfr`) | 10x less memory than HashMap + f64 |
 | Flop algorithm | External sampling MCCFR | Too many runouts for full traversal |
 | Hand abstraction | OCHS bucketing, ~200 per street | Needed for flop memory budget |
+| Turn/river from flop | Save template FlatCfr in flop solution | Zero extra solve time, instant multi-street queries |
 | Bet sizes | 33/66/100% pot (configurable) | Balance accuracy vs tree size |
-| Pre-solve target | Tier 2: 200 flops × 15 scenarios | 90% coverage, practical cost |
-| Deployment | Railway Pro (32 GB, 8 vCPU) | Cheap, sufficient for Tier 2 |
-| Cache format | JSON initially, bincode later | JSON for debugging, bincode for production |
-| Range input | From preflop solver output | Automatic, no manual range entry |
-| Caching | Cache every solve permanently | First solve caches; every repeat query is instant forever |
-| Primary UX | Interactive `gto play` mode | Tracks pot/stack/board automatically, minimal typing |
-| Secondary UX | Positional one-shot `gto AhQd BTN ...` | For quick lookups and study |
-| Cache miss (all streets) | Always return closest match instantly + background solve | Every query 1-3 sec, no exceptions. Background solve caches exact answer for next time |
-| Stack tracking | Auto-carry across hands | No manual pot/stack entry after first hand |
+| Pre-solve scope | All 1,755 flops x 9 positions x 2 pot types | 100% coverage, ~54 days local compute |
+| Cache format | bincode | 5-10x smaller than JSON, fast load |
+| Cache key | board + pot + stack + oop_pos + ip_pos | Prevents position pair collisions |
+| Range derivation | From preflop solver (>5% threshold) | Automatic, no manual range entry |
+| Multiway handling | HU solve vs primary villain + tightening | Only feasible approach given 2-player solver limitation |
+| Primary UX | Localhost web UI (click-based) | Fast enough for live online play (3-5 sec per decision) |
+| Secondary UX | CLI shorthand with action codes | For quick lookups and study |
+| Cache portability | `~/.gto-cli/solver/` directory | Copy to any machine, share, back up |
+
+---
+
+## Design Session Notes
+
+### 2025-02-12: Full audit and roadmap discussion
+
+**Context**: Phases 1-8 implemented. Evaluated readiness for real-world use (live online poker, Club GG).
+
+**Critical issues found**:
+
+1. **Cache key collision** — flop/turn/river cache keys don't include position pair. BTN vs BB and CO vs BB overwrite each other. 8 of 9 position pair solutions lost from batch.
+
+2. **Turn/river data discarded** — flop MCCFR trains 6 FlatCfr instances but only saves flop strategies. Turn/river data thrown away, forcing separate on-demand solves (15-45s for turn, 1-5s for river).
+
+3. **Root-node only lookups** — strategy lookups always return the first tree node (root). No action sequence navigation. Advice is only correct for the first decision on each street. Facing a bet, raise, or check gets the wrong answer.
+
+4. **HU-only assumption** — entire system assumes 2 players. No tracking of preflop action sequence (who opened, who called, who 3-bet). No multiway support.
+
+5. **SRP-only** — hardcoded pot=6, stack=97. 3-bet pots (~20-30% of hands) get wrong answers.
+
+6. **UX too slow for live play** — typing full hand histories in CLI while clock is ticking doesn't work. Need click-based input (web UI).
+
+**Architecture decisions**:
+- Multiway: HU solve + tightening heuristic (industry standard, computationally necessary)
+- Turn/river: embed in flop solution (bucket-level, ~95% accuracy, zero extra compute)
+- Batch: all 1,755 flops + 3BP = 31,590 spots, ~54 days, ~16 GB
+- UI: localhost web app with card grid + action buttons
+
+**Compute analysis**:
+- Railway cloud rejected: Apple Silicon faster per-core than shared cloud vCPUs. ~2x speedup for ~$200 cost. Not worth it.
+- Local batch: ~54 days, zero cost, Mac remains usable (~1.5 GB RAM).
+- Spots become usable as they finish — can play immediately, coverage grows daily.

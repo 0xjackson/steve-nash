@@ -6,6 +6,7 @@ pub mod flat_cfr;
 pub mod display;
 pub mod equity;
 pub mod error;
+pub mod flop_enumerator;
 pub mod game_tree;
 pub mod hand_evaluator;
 pub mod lookup_eval;

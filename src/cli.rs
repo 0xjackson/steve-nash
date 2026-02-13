@@ -376,6 +376,9 @@ enum SolverCommands {
         /// Maximum number of spots to solve
         #[arg(long)]
         limit: Option<usize>,
+        /// Use all 1,755 canonical flops instead of 50 representative
+        #[arg(long)]
+        all_flops: bool,
     },
 }
 
@@ -533,7 +536,8 @@ fn dispatch(cli: Cli) {
                 srp_only,
                 iterations,
                 limit,
-            } => crate::batch::run_batch_solve(stack, srp_only, limit, iterations),
+                all_flops,
+            } => crate::batch::run_batch_solve(stack, srp_only, limit, iterations, all_flops),
         },
     }
 }

@@ -36,8 +36,8 @@ gto AhKs BTN Ks9d4c7h           # turn
 | 6 | CFR engine optimization | DONE | N/A | N/A |
 | 7 | Local batch pre-solve + query interface | DONE | Background | <1 sec |
 | 8 | Strategy engine + play mode (v1) | DONE | N/A | <1 sec |
-| 9 | Critical fixes (cache, data, navigation) | TODO | N/A | N/A |
-| 10 | Full batch expansion (1,755 flops + 3BP) | TODO | ~54 days | Instant |
+| 9 | Critical fixes (cache, data, navigation) | DONE | N/A | N/A |
+| 10 | Full batch expansion (1,755 flops + 3BP) | DONE | ~54 days | Instant |
 | 11 | Play mode rewrite + better output | TODO | N/A | N/A |
 | 12 | Local web UI | TODO | N/A | Instant |
 
@@ -277,9 +277,9 @@ The data IS there: `FlopSolution.strategies` contains `FlopNodeStrategy` entries
 
 ---
 
-## Phase 10: Full Batch Expansion — TODO
+## Phase 10: Full Batch Expansion — DONE
 
-*After Phase 9 fixes. Kick off and let run in background for ~54 days.*
+*Flop enumerator generates all 1,755 canonical flops. Batch supports `--all-flops` flag, 3-bet pots via `--srp-only=false`, and board-first iteration with strategic priority sorting.*
 
 ### 10.1: Generate all 1,755 strategically distinct flops
 

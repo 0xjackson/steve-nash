@@ -8,6 +8,7 @@ mod display;
 mod equity;
 mod error;
 mod flat_cfr;
+mod flop_enumerator;
 mod flop_solver;
 mod game_tree;
 mod hand_evaluator;

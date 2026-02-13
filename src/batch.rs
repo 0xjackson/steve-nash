@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use colored::Colorize;
 
+use crate::flop_enumerator::generate_canonical_flops;
 use crate::flop_solver::{FlopSolverConfig, FlopSolution, solve_flop};
 use crate::preflop_solver::{Position, PreflopSolution};
 use crate::strategy::{derive_defending_range, derive_opening_range, PotType};
@@ -78,6 +79,7 @@ fn generate_manifest(
     solution: &PreflopSolution,
     stack: f64,
     srp_only: bool,
+    all_flops: bool,
 ) -> Vec<BatchSpot> {
     let pairs = position_pairs();
     let pot_types = if srp_only {
@@ -86,8 +88,19 @@ fn generate_manifest(
         vec![PotType::Srp, PotType::ThreeBet]
     };
 
-    let mut spots = Vec::new();
+    // Choose boards: all 1,755 canonical flops or 50 representative
+    let boards: Vec<String> = if all_flops {
+        use crate::flop_enumerator::strategic_priority;
+        let mut flops = generate_canonical_flops();
+        // Sort by strategic priority descending (A-high first, low boards last)
+        flops.sort_by(|a, b| strategic_priority(b).cmp(&strategic_priority(a)));
+        flops
+    } else {
+        REPRESENTATIVE_FLOPS.iter().map(|s| s.to_string()).collect()
+    };
 
+    // Pre-compute ranges for each position pair
+    let mut pair_data: Vec<(Position, Position, String, String, String, String)> = Vec::new();
     for &(opener, responder) in &pairs {
         let spot = match solution.find_spot(opener, responder) {
             Some(s) => s,
@@ -101,31 +114,37 @@ fn generate_manifest(
             continue;
         }
 
-        // Determine OOP/IP
         let (oop_range, ip_range, oop_pos, ip_pos) = if opener.is_ip_vs(&responder) {
             (responder_range.join(","), opener_range.join(","), responder.as_str().to_string(), opener.as_str().to_string())
         } else {
             (opener_range.join(","), responder_range.join(","), opener.as_str().to_string(), responder.as_str().to_string())
         };
 
+        pair_data.push((opener, responder, oop_range, ip_range, oop_pos, ip_pos));
+    }
+
+    let mut spots = Vec::new();
+
+    // Board-first iteration: for each board, solve all position pairs and pot
+    // types before moving to the next board. This ensures the highest-priority
+    // boards get full position coverage first.
+    for board in &boards {
+        let board_clean: String = board.chars().filter(|c| !c.is_whitespace()).collect();
+        if board_clean.len() != 6 {
+            continue;
+        }
+
         for pot_type in &pot_types {
             let (pot, eff_stack) = pot_type.pot_and_stack();
-            // Scale stack if non-default
             let scale = stack / 100.0;
             let pot_scaled = pot * scale;
             let stack_scaled = eff_stack * scale;
 
-            for &board in REPRESENTATIVE_FLOPS {
-                // Clean whitespace from board (some have spaces for readability)
-                let board_clean: String = board.chars().filter(|c| !c.is_whitespace()).collect();
-                if board_clean.len() != 6 {
-                    continue;
-                }
-
+            for (opener, responder, oop_range, ip_range, oop_pos, ip_pos) in &pair_data {
                 spots.push(BatchSpot {
-                    opener,
-                    responder,
-                    board: board_clean,
+                    opener: *opener,
+                    responder: *responder,
+                    board: board_clean.clone(),
                     pot_type: *pot_type,
                     oop_range: oop_range.clone(),
                     ip_range: ip_range.clone(),
@@ -145,7 +164,7 @@ fn generate_manifest(
 // Batch solver
 // ---------------------------------------------------------------------------
 
-pub fn run_batch_solve(stack: f64, srp_only: bool, limit: Option<usize>, iterations: usize) {
+pub fn run_batch_solve(stack: f64, srp_only: bool, limit: Option<usize>, iterations: usize, all_flops: bool) {
     // 1. Load preflop solution
     let solution = match PreflopSolution::load("6max", stack, 0.0) {
         Ok(s) => s,
@@ -159,7 +178,7 @@ pub fn run_batch_solve(stack: f64, srp_only: bool, limit: Option<usize>, iterati
     };
 
     // 2. Generate manifest
-    let mut manifest = generate_manifest(&solution, stack, srp_only);
+    let mut manifest = generate_manifest(&solution, stack, srp_only, all_flops);
 
     // Apply limit
     if let Some(max) = limit {
@@ -174,10 +193,11 @@ pub fn run_batch_solve(stack: f64, srp_only: bool, limit: Option<usize>, iterati
         total.to_string().bold(),
     );
     println!(
-        "  Stack: {}bb | Iterations: {} | {}",
+        "  Stack: {}bb | Iterations: {} | {} | {} flops",
         stack,
         iterations,
         if srp_only { "SRP only" } else { "SRP + 3-bet pots" },
+        if all_flops { "1,755" } else { "50 representative" },
     );
     println!();
 

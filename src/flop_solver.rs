@@ -538,6 +538,7 @@ pub fn solve_flop(config: &FlopSolverConfig) -> FlopSolution {
                 &mut river_ip_cfr,
                 &mut strategy_buf,
                 &mut action_values,
+                iter,
             );
         }
     }
@@ -605,6 +606,7 @@ fn cfr_traverse_flop(
     river_ip_cfr: &mut FlatCfr,
     strategy_buf: &mut [f32],
     action_values_buf: &mut [f32],
+    iter: usize,
 ) -> f64 {
     match node {
         TreeNode::Terminal {
@@ -655,6 +657,7 @@ fn cfr_traverse_flop(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                     // The turn template returns values in template units,
                     // already scaled by turn_scale inside the traversal.
@@ -682,6 +685,11 @@ fn cfr_traverse_flop(
 
                 let mut node_value = 0.0f64;
                 for a in 0..num_actions {
+                    // Regret pruning: skip near-zero-probability actions after warmup
+                    if strategy_buf[a] < 0.001 && iter > 1000 && iter % 1000 != 0 {
+                        action_values_buf[a] = 0.0;
+                        continue;
+                    }
                     let av = cfr_traverse_flop(
                         &children[a],
                         traverser,
@@ -715,6 +723,7 @@ fn cfr_traverse_flop(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                     action_values_buf[a] = av as f32;
                     node_value += strategy_buf[a] as f64 * av;
@@ -805,6 +814,7 @@ fn cfr_traverse_flop(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                 }
 
@@ -849,6 +859,7 @@ fn cfr_traverse_turn_template(
     river_ip_cfr: &mut FlatCfr,
     strategy_buf: &mut [f32],
     action_values_buf: &mut [f32],
+    iter: usize,
 ) -> f64 {
     match node {
         TreeNode::Terminal {
@@ -894,6 +905,7 @@ fn cfr_traverse_turn_template(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     )
                 }
             }
@@ -917,6 +929,11 @@ fn cfr_traverse_turn_template(
 
                 let mut node_value = 0.0f64;
                 for a in 0..num_actions {
+                    // Regret pruning: skip near-zero-probability actions after warmup
+                    if strategy_buf[a] < 0.001 && iter > 1000 && iter % 1000 != 0 {
+                        action_values_buf[a] = 0.0;
+                        continue;
+                    }
                     let av = cfr_traverse_turn_template(
                         &children[a],
                         traverser,
@@ -942,6 +959,7 @@ fn cfr_traverse_turn_template(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                     action_values_buf[a] = av as f32;
                     node_value += strategy_buf[a] as f64 * av;
@@ -1022,6 +1040,7 @@ fn cfr_traverse_turn_template(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                 }
 
@@ -1060,6 +1079,7 @@ fn cfr_traverse_river_template(
     river_ip_cfr: &mut FlatCfr,
     strategy_buf: &mut [f32],
     action_values_buf: &mut [f32],
+    iter: usize,
 ) -> f64 {
     match node {
         TreeNode::Terminal {
@@ -1154,6 +1174,11 @@ fn cfr_traverse_river_template(
 
                 let mut node_value = 0.0f64;
                 for a in 0..num_actions {
+                    // Regret pruning: skip near-zero-probability actions after warmup
+                    if strategy_buf[a] < 0.001 && iter > 1000 && iter % 1000 != 0 {
+                        action_values_buf[a] = 0.0;
+                        continue;
+                    }
                     let av = cfr_traverse_river_template(
                         &children[a],
                         traverser,
@@ -1173,6 +1198,7 @@ fn cfr_traverse_river_template(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                     action_values_buf[a] = av as f32;
                     node_value += strategy_buf[a] as f64 * av;
@@ -1247,6 +1273,7 @@ fn cfr_traverse_river_template(
                         river_ip_cfr,
                         strategy_buf,
                         action_values_buf,
+                        iter,
                     );
                 }
 
